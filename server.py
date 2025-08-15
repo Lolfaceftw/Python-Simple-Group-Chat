@@ -33,7 +33,7 @@ class ChatServer:
         # A dictionary to store connected clients {socket: (address, username)}
         self.clients: Dict[socket.socket, Tuple[str, str]] = {}
         # A lock to ensure thread-safe access to the clients dictionary
-        self.lock: threading.Lock = threading.Lock()
+        self.lock: threading.RLock = threading.RLock()
 
     def _broadcast(self, message: str, sender_socket: socket.socket = None) -> None:
         """
