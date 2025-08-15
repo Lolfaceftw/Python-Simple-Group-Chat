@@ -194,9 +194,6 @@ class ChatClient:
                     if msg_type == "MSG":
                         self._add_message(Text(payload, "cyan"))
                     elif msg_type == "SRV":
-                        if "Username changed to" in payload:
-                            new_name = payload.split(" ")[-1]
-                            self.username = new_name
                         self._add_message(Text(f"=> {payload}", "yellow italic"))
                     elif msg_type == "ULIST":
                         with self._lock:
@@ -273,7 +270,10 @@ class ChatClient:
                     elif message_text.startswith('/nick '):
                         new_username = message_text.split(' ', 1)[1].strip()
                         if new_username:
-                            self._send_message(f"CMD_USER|{new_username}")
+                            # Optimistically update the local username
+                            self.username = new_username
+                            self._send_message(f"CMD_USER|{self.username}")
+                            self._add_message(Text(f"Username changed to {self.username}", "green"))
                         else:
                             self._add_message(Text("Invalid nickname.", "red"))
                     else:
