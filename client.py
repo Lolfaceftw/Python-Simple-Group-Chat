@@ -71,18 +71,20 @@ class ChatClient:
     def _get_chat_panel(self) -> Panel:
         """Creates the chat history panel, respecting the scroll offset."""
         with self._lock:
-            # Calculate the visible portion of the chat history
-            panel_height = console.height - 6  # Adjust for header/footer
-            
-            # Prevent negative panel height
-            if panel_height < 1:
-                return Panel(Group(), title=f"Chatting as [cyan]{self.username}[/cyan]", border_style="green", expand=True)
+            # If scrolled, slice from the end of the list based on the offset.
+            if self.scroll_offset > 0:
+                end_index = len(self.chat_history) - self.scroll_offset
+                # Define a fixed window size for scrolled view
+                panel_height = console.height - 8
+                start_index = max(0, end_index - panel_height)
+                visible_history = self.chat_history[start_index:end_index]
+            # If at the bottom, just show the most recent messages.
+            # Slicing with a negative index is a robust way to get the last N items.
+            else:
+                # Display the last N messages, where N is the available space.
+                panel_height = console.height - 8
+                visible_history = self.chat_history[-panel_height:]
 
-            # Calculate the slice of history to show
-            end_index = len(self.chat_history) - self.scroll_offset
-            start_index = max(0, end_index - panel_height)
-            
-            visible_history = self.chat_history[start_index:end_index]
             chat_group = Group(*visible_history)
 
         # Add a scroll indicator if not at the bottom
@@ -114,11 +116,8 @@ class ChatClient:
         """Adds a message to the chat history in a thread-safe manner."""
         with self._lock:
             self.chat_history.append(message)
-            # If the user is not scrolled up, keep them at the bottom
-            if self.scroll_offset > 0:
-                # If they are scrolled up, increment the offset to keep their view stable
-                self.scroll_offset += 1
-            
+            # Always jump to the bottom when a new message is added
+            self.scroll_offset = 0
             self.ui_dirty = True # Signal that the UI needs to be updated
 
             # Optional: Trim history to prevent infinite growth
