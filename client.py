@@ -35,6 +35,9 @@ def discover_servers() -> List[str]:
     console.print("[cyan]Scanning for servers on the local network...[/cyan]")
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        # Allow multiple clients on the same machine to listen for broadcasts
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         # Bind to the discovery port to receive broadcasts
         try:
             sock.bind(("", DISCOVERY_PORT))
