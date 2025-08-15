@@ -21,7 +21,50 @@ else:
     # For now, we'll add a placeholder.
     pass
 
+# --- Service Discovery Protocol --- #
+DISCOVERY_PORT = 8081
+DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
+DISCOVERY_TIMEOUT_S = 3
+# ---------------------------------- #
+
 console = Console()
+
+def discover_servers() -> List[str]:
+    """Listens for server discovery broadcasts on the network."""
+    discovered_servers = set()
+    console.print("[cyan]Scanning for servers on the local network...[/cyan]")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        # Bind to the discovery port to receive broadcasts
+        try:
+            sock.bind(("", DISCOVERY_PORT))
+        except OSError as e:
+            console.print(f"[bold red]Error: Could not bind to port {DISCOVERY_PORT} for discovery. {e}[/bold red]")
+            console.print("[yellow]Hint: Is another client already running?[/yellow]")
+            return []
+        
+        # Listen for a few seconds
+        sock.settimeout(DISCOVERY_TIMEOUT_S)
+
+        end_time = time.time() + DISCOVERY_TIMEOUT_S
+        while time.time() < end_time:
+            try:
+                data, addr = sock.recvfrom(1024)
+                if data == DISCOVERY_MESSAGE:
+                    discovered_servers.add(addr[0])
+            except socket.timeout:
+                break # No more messages
+            except Exception as e:
+                console.log(f"[red]Error during discovery: {e}[/red]")
+                break
+    
+    server_list = sorted(list(discovered_servers))
+    if server_list:
+        console.print(f"[green]Found {len(server_list)} server(s): {', '.join(server_list)}[/green]")
+    else:
+        console.print("[yellow]No servers found on the network.[/yellow]")
+
+    return server_list
 
 class ChatClient:
     """
@@ -339,7 +382,19 @@ class ChatClient:
 if __name__ == "__main__":
     console.print(Panel("[bold cyan]Welcome to the Python Chat Client![/bold cyan]", border_style="cyan"))
     try:
-        server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
+        # Discover servers on the network first
+        available_servers = discover_servers()
+
+        # Use a dropdown if servers are found, otherwise a normal prompt
+        if available_servers:
+            server_ip = Prompt.ask(
+                "[cyan]Enter Server IP[/cyan]",
+                choices=available_servers,
+                default=available_servers[0]
+            )
+        else:
+            server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
+
         server_port_str = Prompt.ask("[cyan]Enter Server Port[/cyan]", default="8080")
         username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
 

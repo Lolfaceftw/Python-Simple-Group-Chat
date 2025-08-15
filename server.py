@@ -3,6 +3,7 @@
 import socket
 import sys
 import threading
+import time
 from collections import deque
 from typing import Deque, Dict, Tuple
 
@@ -12,6 +13,14 @@ from rich.prompt import Prompt
 
 # Initialize a Rich console for beautiful server-side logging
 console = Console()
+
+# --- Service Discovery Protocol --- #
+DISCOVERY_PORT = 8081
+DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
+BROADCAST_INTERVAL_S = 5
+# ---------------------------------- #
+
+class ChatServer:
 
 class ChatServer:
     """
@@ -168,6 +177,12 @@ class ChatServer:
             # for the KeyboardInterrupt signal.
             self.server_socket.settimeout(1.0)
             console.print(Panel(f"[bold green]Server is listening on {self.host}:{self.port}[/bold green]", title="Server Status"))
+
+            # Start the discovery broadcast thread
+            broadcast_thread = threading.Thread(target=self._broadcast_presence)
+            broadcast_thread.daemon = True
+            broadcast_thread.start()
+
         except OSError as e:
             console.print(f"[bold red]Error: Could not bind to port {self.port}. {e}[/bold red]")
             console.print("[yellow]Hint: The port might be in use, or you may need administrative privileges.[/yellow]")
@@ -196,7 +211,27 @@ class ChatServer:
                     s.close()
             self.server_socket.close()
             console.log("[bold red]Server has been shut down.[/bold red]")
+            # A clean exit is preferred
             sys.exit(0)
+
+    def _broadcast_presence(self) -> None:
+        """Periodically broadcasts a discovery message on the local network."""
+        # Create a UDP socket for broadcasting
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            # Set the socket to allow broadcasting
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            # Use the broadcast address for the local network
+            broadcast_address = ('<broadcast>', DISCOVERY_PORT)
+            console.log(f"Starting service discovery broadcast on port {DISCOVERY_PORT}")
+
+            while True:
+                try:
+                    sock.sendto(DISCOVERY_MESSAGE, broadcast_address)
+                    time.sleep(BROADCAST_INTERVAL_S)
+                except Exception as e:
+                    console.log(f"[bold red]Discovery broadcast failed: {e}[/bold red]")
+                    # Avoid busy-looping on persistent errors
+                    time.sleep(BROADCAST_INTERVAL_S * 2)
 
 
 if __name__ == "__main__":
