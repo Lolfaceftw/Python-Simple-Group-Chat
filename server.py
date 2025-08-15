@@ -90,6 +90,11 @@ class ChatServer:
             self.clients[client_socket] = (addr_str, username)
 
         console.log(f"[bold green]New connection from {addr_str}.[/bold green]")
+        
+        # Announce the new user to all other clients
+        join_notification = f"SRV|{username} has joined the chat."
+        self._broadcast(join_notification, client_socket)
+
 
         try:
             while True:
