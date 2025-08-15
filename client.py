@@ -4,7 +4,7 @@ import socket
 import sys
 import threading
 import time
-from typing import List
+from typing import Dict, List
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -21,7 +21,53 @@ else:
     # For now, we'll add a placeholder.
     pass
 
+# --- Service Discovery Protocol --- #
+DISCOVERY_PORT = 8081
+DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
+DISCOVERY_TIMEOUT_S = 3
+# ---------------------------------- #
+
 console = Console()
+
+def discover_servers() -> List[str]:
+    """Listens for server discovery broadcasts on the network."""
+    discovered_servers = set()
+    console.print("[cyan]Scanning for servers on the local network...[/cyan]")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        # Allow multiple clients on the same machine to listen for broadcasts
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+        # Bind to the discovery port to receive broadcasts
+        try:
+            sock.bind(("", DISCOVERY_PORT))
+        except OSError as e:
+            console.print(f"[bold red]Error: Could not bind to port {DISCOVERY_PORT} for discovery. {e}[/bold red]")
+            console.print("[yellow]Hint: Is another client already running?[/yellow]")
+            return []
+        
+        # Listen for a few seconds
+        sock.settimeout(DISCOVERY_TIMEOUT_S)
+
+        end_time = time.time() + DISCOVERY_TIMEOUT_S
+        while time.time() < end_time:
+            try:
+                data, addr = sock.recvfrom(1024)
+                if data == DISCOVERY_MESSAGE:
+                    discovered_servers.add(addr[0])
+            except socket.timeout:
+                break # No more messages
+            except Exception as e:
+                console.log(f"[red]Error during discovery: {e}[/red]")
+                break
+    
+    server_list = sorted(list(discovered_servers))
+    if server_list:
+        console.print(f"[green]Found {len(server_list)} server(s): {', '.join(server_list)}[/green]")
+    else:
+        console.print("[yellow]No servers found on the network.[/yellow]")
+
+    return server_list
 
 class ChatClient:
     """
@@ -44,6 +90,12 @@ class ChatClient:
         self.input_buffer: str = ""
         self.scroll_offset: int = 0
         self.ui_dirty: bool = True # Flag to trigger UI updates
+        
+        # User list state
+        self.user_list: Dict[str, str] = {}
+        self.user_panel_scroll_offset: int = 0
+        self.active_panel: str = "chat" # 'chat' or 'users'
+
         self.network_buffer: bytes = b""
         self.layout: Layout = self._create_layout()
 
@@ -55,34 +107,36 @@ class ChatClient:
             Layout(ratio=1, name="main"),
             Layout(size=3, name="footer"),
         )
+        layout["main"].split_row(Layout(name="chat_panel"), Layout(name="user_panel", size=40))
         layout["header"].update(
             Panel(
                 Text(
-                    "Python Group Chat | Commands: /nick <name>, /quit",
+                    "Python Group Chat | Commands: /nick <name>, /quit | Press TAB to switch panels",
                     justify="center",
                 ),
                 border_style="blue",
             )
         )
-        layout["main"].update(self._get_chat_panel())
-        layout["footer"].update(self._get_input_panel())
+        # Panels will be updated in the main loop
         return layout
 
     def _get_chat_panel(self) -> Panel:
         """Creates the chat history panel, respecting the scroll offset."""
         with self._lock:
-            # Calculate the visible portion of the chat history
-            panel_height = console.height - 6  # Adjust for header/footer
-            
-            # Prevent negative panel height
-            if panel_height < 1:
-                return Panel(Group(), title=f"Chatting as [cyan]{self.username}[/cyan]", border_style="green", expand=True)
+            # If scrolled, slice from the end of the list based on the offset.
+            if self.scroll_offset > 0:
+                end_index = len(self.chat_history) - self.scroll_offset
+                # Define a fixed window size for scrolled view
+                panel_height = console.height - 8
+                start_index = max(0, end_index - panel_height)
+                visible_history = self.chat_history[start_index:end_index]
+            # If at the bottom, just show the most recent messages.
+            # Slicing with a negative index is a robust way to get the last N items.
+            else:
+                # Display the last N messages, where N is the available space.
+                panel_height = console.height - 8
+                visible_history = self.chat_history[-panel_height:]
 
-            # Calculate the slice of history to show
-            end_index = len(self.chat_history) - self.scroll_offset
-            start_index = max(0, end_index - panel_height)
-            
-            visible_history = self.chat_history[start_index:end_index]
             chat_group = Group(*visible_history)
 
         # Add a scroll indicator if not at the bottom
@@ -91,10 +145,46 @@ class ChatClient:
         if is_scrolled:
             title += f" [yellow](scrolled up {self.scroll_offset} lines)[/yellow]"
 
+        border_style = "green" if self.active_panel == "chat" else "dim"
+
         return Panel(
             chat_group,
             title=title,
-            border_style="green",
+            border_style=border_style,
+            expand=True,
+        )
+
+    def _get_users_panel(self) -> Panel:
+        """Creates the user list panel."""
+        with self._lock:
+            user_list = sorted(self.user_list.items())
+
+        # Handle scrolling for the user panel
+        panel_height = console.height - 8
+        if self.user_panel_scroll_offset > 0:
+            end_index = len(user_list) - self.user_panel_scroll_offset
+            start_index = max(0, end_index - panel_height)
+            visible_users = user_list[start_index:end_index]
+        else:
+            visible_users = user_list[-panel_height:]
+
+        user_texts = []
+        for username, address in visible_users:
+            # Add a marker for the current user
+            if username == self.username:
+                user_texts.append(Text(f"-> {username}", style="bold bright_blue"))
+            else:
+                user_texts.append(Text(username))
+        
+        border_style = "green" if self.active_panel == "users" else "dim"
+        title = "Users"
+        if self.user_panel_scroll_offset > 0:
+            title += f" [yellow](scrolled)[/yellow]"
+
+        return Panel(
+            Group(*user_texts),
+            title=title,
+            border_style=border_style,
             expand=True,
         )
 
@@ -107,18 +197,16 @@ class ChatClient:
 
     def _update_layout(self) -> None:
         """Updates the layout with the latest chat and input data."""
-        self.layout["main"].update(self._get_chat_panel())
+        self.layout["chat_panel"].update(self._get_chat_panel())
+        self.layout["user_panel"].update(self._get_users_panel())
         self.layout["footer"].update(self._get_input_panel())
 
     def _add_message(self, message: Text) -> None:
         """Adds a message to the chat history in a thread-safe manner."""
         with self._lock:
             self.chat_history.append(message)
-            # If the user is not scrolled up, keep them at the bottom
-            if self.scroll_offset > 0:
-                # If they are scrolled up, increment the offset to keep their view stable
-                self.scroll_offset += 1
-            
+            # Always jump to the bottom when a new message is added
+            self.scroll_offset = 0
             self.ui_dirty = True # Signal that the UI needs to be updated
 
             # Optional: Trim history to prevent infinite growth
@@ -152,10 +240,19 @@ class ChatClient:
                     if msg_type == "MSG":
                         self._add_message(Text(payload, "cyan"))
                     elif msg_type == "SRV":
-                        if "Username changed to" in payload:
-                            new_name = payload.split(" ")[-1]
-                            self.username = new_name
                         self._add_message(Text(f"=> {payload}", "yellow italic"))
+                    elif msg_type == "ULIST":
+                        with self._lock:
+                            self.user_list.clear()
+                            if not payload:
+                                continue
+                            user_entries = payload.split(',')
+                            for entry in user_entries:
+                                # Format is "username(address)"
+                                if '(' in entry and entry.endswith(')'):
+                                    username, address = entry.rsplit('(', 1)
+                                    self.user_list[username] = address[:-1] # Remove trailing ')'
+                        self.ui_dirty = True
 
             except (ConnectionResetError, OSError):
                 if self.is_running:
@@ -177,26 +274,35 @@ class ChatClient:
     def _handle_input_windows(self) -> None:
         """Handles non-blocking keyboard input on Windows."""
         if msvcrt.kbhit():
-            # An input event occurred, so the UI will need to be redrawn
             self.ui_dirty = True
-
             char = msvcrt.getch()
 
-            # Special keys (like arrows) are sent as two bytes.
-            # The first is \xe0 (224) or \x00.
+            # TAB key to switch active panel
+            if char == b'\t':
+                self.active_panel = "users" if self.active_panel == "chat" else "chat"
+                return
+
+            # Special keys (like arrows)
             if char in [b'\xe0', b'\x00']:
-                # Read the next byte to get the actual key code
                 key_code = msvcrt.getch()
                 # Up Arrow
                 if key_code == b'H':
-                    self.scroll_offset = min(len(self.chat_history) - 1, self.scroll_offset + 1)
+                    if self.active_panel == 'chat':
+                        self.scroll_offset = min(len(self.chat_history) - 1, self.scroll_offset + 1)
+                    else:
+                        self.user_panel_scroll_offset = min(len(self.user_list) - 1, self.user_panel_scroll_offset + 1)
                 # Down Arrow
                 elif key_code == b'P':
-                    self.scroll_offset = max(0, self.scroll_offset - 1)
-                return # Ignore other special keys for now
+                    if self.active_panel == 'chat':
+                        self.scroll_offset = max(0, self.scroll_offset - 1)
+                    else:
+                        self.user_panel_scroll_offset = max(0, self.user_panel_scroll_offset - 1)
+                return
 
-            # Reset scroll on any other action to see what you're doing
+            # On any other key, reset focus to chat panel and handle input
+            self.active_panel = "chat"
             self.scroll_offset = 0
+            self.user_panel_scroll_offset = 0
 
             # Enter key
             if char == b'\r':
@@ -210,13 +316,15 @@ class ChatClient:
                     elif message_text.startswith('/nick '):
                         new_username = message_text.split(' ', 1)[1].strip()
                         if new_username:
-                            self._send_message(f"CMD_USER|{new_username}")
+                            # Optimistically update the local username
+                            self.username = new_username
+                            self._send_message(f"CMD_USER|{self.username}")
+                            self._add_message(Text(f"Username changed to {self.username}", "green"))
                         else:
                             self._add_message(Text("Invalid nickname.", "red"))
                     else:
                         full_message = f"MSG|{self.username}: {message_text}"
                         self._send_message(full_message)
-                        # Add the message to our own history for local display
                         self._add_message(Text(f"{self.username}: {message_text}", "bright_blue"))
             # Backspace
             elif char == b'\x08':
@@ -226,7 +334,7 @@ class ChatClient:
                 try:
                     self.input_buffer += char.decode('utf-8')
                 except UnicodeDecodeError:
-                    pass # Ignore non-UTF-8 characters
+                    pass
 
     def start(self) -> None:
         """
@@ -277,7 +385,19 @@ class ChatClient:
 if __name__ == "__main__":
     console.print(Panel("[bold cyan]Welcome to the Python Chat Client![/bold cyan]", border_style="cyan"))
     try:
-        server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
+        # Discover servers on the network first
+        available_servers = discover_servers()
+
+        # Use a dropdown if servers are found, otherwise a normal prompt
+        if available_servers:
+            server_ip = Prompt.ask(
+                "[cyan]Enter Server IP[/cyan]",
+                choices=available_servers,
+                default=available_servers[0]
+            )
+        else:
+            server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
+
         server_port_str = Prompt.ask("[cyan]Enter Server Port[/cyan]", default="8080")
         username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
 

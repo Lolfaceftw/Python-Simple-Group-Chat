@@ -3,6 +3,7 @@
 import socket
 import sys
 import threading
+import time
 from collections import deque
 from typing import Deque, Dict, Tuple
 
@@ -12,6 +13,12 @@ from rich.prompt import Prompt
 
 # Initialize a Rich console for beautiful server-side logging
 console = Console()
+
+# --- Service Discovery Protocol --- #
+DISCOVERY_PORT = 8081
+DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
+BROADCAST_INTERVAL_S = 5
+# ---------------------------------- #
 
 class ChatServer:
     """
@@ -54,6 +61,18 @@ class ChatServer:
                 if client_socket != sender_socket:
                     self._send_direct_message(client_socket, message)
 
+    def _broadcast_user_list(self) -> None:
+        """Constructs and broadcasts the current user list to all clients."""
+        with self.lock:
+            if not self.clients:
+                return
+            # Format: "user1(addr1),user2(addr2)"
+            user_list_str = ",".join(
+                [f"{username}({addr})" for addr, username in self.clients.values()]
+            )
+            message = f"ULIST|{user_list_str}"
+            self._broadcast(message)
+
     def _send_direct_message(self, client_socket: socket.socket, message: str) -> None:
         """Sends a newline-terminated message directly to a single client."""
         try:
@@ -80,6 +99,7 @@ class ChatServer:
                 notification = f"SRV|{username} has left the chat."
                 self.message_history.append(notification)
                 self._broadcast(notification)
+                self._broadcast_user_list()
 
     def _handle_client(self, client_socket: socket.socket, address: Tuple[str, int]) -> None:
         """
@@ -92,21 +112,19 @@ class ChatServer:
         addr_str = f"{address[0]}:{address[1]}"
         console.log(f"[bold green]New connection from {addr_str}.[/bold green]")
         
-        # Set a default username and add the client to the dictionary
         with self.lock:
             username = f"User_{addr_str}"
             self.clients[client_socket] = (addr_str, username)
 
-            # Send a welcome message and the chat history to the new client
             self._send_direct_message(client_socket, "SRV|Welcome! Here are the recent messages:")
             for msg in self.message_history:
                 self._send_direct_message(client_socket, msg)
         
-        # Announce the new user to all other clients and log the event
         join_notification = f"SRV|{username} has joined the chat."
         with self.lock:
             self.message_history.append(join_notification)
         self._broadcast(join_notification, client_socket)
+        self._broadcast_user_list() # Send initial user list
 
         try:
             while True:
@@ -114,7 +132,10 @@ class ChatServer:
                 if not data:
                     break
 
-                message = data.decode('utf-8')
+                message = data.decode('utf-8').strip()
+                if not message:
+                    continue
+
                 parts = message.split('|', 1)
                 msg_type = parts[0]
                 payload = parts[1] if len(parts) > 1 else ""
@@ -123,10 +144,11 @@ class ChatServer:
                     with self.lock:
                         old_username = self.clients[client_socket][1]
                         self.clients[client_socket] = (addr_str, payload)
-                        username = payload # Update local username variable
+                        username = payload
                     notification = f"SRV|{old_username} is now known as {username}."
                     console.log(f"[yellow]{notification}[/yellow]")
                     self._broadcast(notification)
+                    self._broadcast_user_list() # Send updated user list
 
                 elif msg_type == "MSG":
                     console.log(f"[cyan]{payload}[/cyan]")
@@ -153,6 +175,12 @@ class ChatServer:
             # for the KeyboardInterrupt signal.
             self.server_socket.settimeout(1.0)
             console.print(Panel(f"[bold green]Server is listening on {self.host}:{self.port}[/bold green]", title="Server Status"))
+
+            # Start the discovery broadcast thread
+            broadcast_thread = threading.Thread(target=self._broadcast_presence)
+            broadcast_thread.daemon = True
+            broadcast_thread.start()
+
         except OSError as e:
             console.print(f"[bold red]Error: Could not bind to port {self.port}. {e}[/bold red]")
             console.print("[yellow]Hint: The port might be in use, or you may need administrative privileges.[/yellow]")
@@ -181,7 +209,27 @@ class ChatServer:
                     s.close()
             self.server_socket.close()
             console.log("[bold red]Server has been shut down.[/bold red]")
+            # A clean exit is preferred
             sys.exit(0)
+
+    def _broadcast_presence(self) -> None:
+        """Periodically broadcasts a discovery message on the local network."""
+        # Create a UDP socket for broadcasting
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            # Set the socket to allow broadcasting
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            # Use the broadcast address for the local network
+            broadcast_address = ('<broadcast>', DISCOVERY_PORT)
+            console.log(f"Starting service discovery broadcast on port {DISCOVERY_PORT}")
+
+            while True:
+                try:
+                    sock.sendto(DISCOVERY_MESSAGE, broadcast_address)
+                    time.sleep(BROADCAST_INTERVAL_S)
+                except Exception as e:
+                    console.log(f"[bold red]Discovery broadcast failed: {e}[/bold red]")
+                    # Avoid busy-looping on persistent errors
+                    time.sleep(BROADCAST_INTERVAL_S * 2)
 
 
 if __name__ == "__main__":
