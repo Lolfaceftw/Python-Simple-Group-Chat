@@ -44,6 +44,7 @@ class ChatClient:
         self.input_buffer: str = ""
         self.scroll_offset: int = 0
         self.ui_dirty: bool = True # Flag to trigger UI updates
+        self.network_buffer: bytes = b""
         self.layout: Layout = self._create_layout()
 
     def _create_layout(self) -> Layout:
@@ -126,34 +127,45 @@ class ChatClient:
 
     def _receive_messages(self) -> None:
         """
-        Listens for incoming messages from the server.
-        This method runs in a separate thread.
+        Listens for incoming messages and processes them from a buffer.
         """
         while self.is_running:
             try:
-                message = self.client_socket.recv(4096).decode('utf-8')
-                if not message:
+                # Receive data and append it to the buffer
+                data = self.client_socket.recv(4096)
+                if not data:
                     self.is_running = False
                     break
+                self.network_buffer += data
 
-                parts = message.split('|', 1)
-                msg_type = parts[0]
-                payload = parts[1] if len(parts) > 1 else ""
-                
-                if msg_type == "MSG":
-                    self._add_message(Text(payload, "cyan"))
-                elif msg_type == "SRV":
-                    # Check for username change confirmation
-                    if "Username changed to" in payload:
-                        new_name = payload.split(" ")[-1]
-                        self.username = new_name
-                    self._add_message(Text(f"=> {payload}", "yellow italic"))
-                
+                # Process all complete messages (newline-terminated) in the buffer
+                while b'\n' in self.network_buffer:
+                    message, self.network_buffer = self.network_buffer.split(b'\n', 1)
+                    message_str = message.decode('utf-8').strip()
+                    if not message_str:
+                        continue
+
+                    parts = message_str.split('|', 1)
+                    msg_type = parts[0]
+                    payload = parts[1] if len(parts) > 1 else ""
+                    
+                    if msg_type == "MSG":
+                        self._add_message(Text(payload, "cyan"))
+                    elif msg_type == "SRV":
+                        if "Username changed to" in payload:
+                            new_name = payload.split(" ")[-1]
+                            self.username = new_name
+                        self._add_message(Text(f"=> {payload}", "yellow italic"))
+
             except (ConnectionResetError, OSError):
                 if self.is_running:
                     self._add_message(Text("Connection to server lost.", "bold red"))
                 self.is_running = False
                 break
+            except UnicodeDecodeError:
+                # Handle cases where a partial multi-byte character is received
+                # The loop will continue and hopefully get the rest of the character
+                pass
 
     def _send_message(self, message: str) -> None:
         """Sends a formatted message to the server."""

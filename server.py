@@ -52,16 +52,12 @@ class ChatServer:
         with self.lock:
             for client_socket in self.clients:
                 if client_socket != sender_socket:
-                    try:
-                        client_socket.send(message.encode('utf-8'))
-                    except socket.error:
-                        # If sending fails, assume the client is disconnected and handle it
-                        self._remove_client(client_socket)
+                    self._send_direct_message(client_socket, message)
 
     def _send_direct_message(self, client_socket: socket.socket, message: str) -> None:
-        """Sends a message directly to a single client."""
+        """Sends a newline-terminated message directly to a single client."""
         try:
-            client_socket.send(message.encode('utf-8'))
+            client_socket.send((message + '\n').encode('utf-8'))
         except socket.error:
             self._remove_client(client_socket)
 
@@ -80,8 +76,9 @@ class ChatServer:
                 console.log(f"[bold red]Client {username} ({address}) has disconnected.[/bold red]")
                 del self.clients[client_socket]
                 client_socket.close()
-                # Notify remaining clients about the disconnection
+                # Notify remaining clients and log the event
                 notification = f"SRV|{username} has left the chat."
+                self.message_history.append(notification)
                 self._broadcast(notification)
 
     def _handle_client(self, client_socket: socket.socket, address: Tuple[str, int]) -> None:
@@ -105,8 +102,10 @@ class ChatServer:
             for msg in self.message_history:
                 self._send_direct_message(client_socket, msg)
         
-        # Announce the new user to all other clients
+        # Announce the new user to all other clients and log the event
         join_notification = f"SRV|{username} has joined the chat."
+        with self.lock:
+            self.message_history.append(join_notification)
         self._broadcast(join_notification, client_socket)
 
         try:
@@ -143,11 +142,16 @@ class ChatServer:
 
     def start(self) -> None:
         """
-        Binds the server to the host and port and starts listening for connections.
+        Binds the server and starts the main loop with a timeout.
+        This allows the server to listen for connections while still being
+        able to gracefully shut down on a KeyboardInterrupt.
         """
         try:
             self.server_socket.bind((self.host, self.port))
             self.server_socket.listen(5)
+            # Set a timeout on the server socket to allow for periodic checks
+            # for the KeyboardInterrupt signal.
+            self.server_socket.settimeout(1.0)
             console.print(Panel(f"[bold green]Server is listening on {self.host}:{self.port}[/bold green]", title="Server Status"))
         except OSError as e:
             console.print(f"[bold red]Error: Could not bind to port {self.port}. {e}[/bold red]")
@@ -156,24 +160,27 @@ class ChatServer:
 
         try:
             while True:
-                # Accept a new connection
-                client_socket, address = self.server_socket.accept()
-                # Create and start a new thread to handle this client
-                thread = threading.Thread(target=self._handle_client, args=(client_socket, address))
-                thread.daemon = True # Allows main thread to exit even if client threads are running
-                thread.start()
+                try:
+                    # Accept a new connection
+                    client_socket, address = self.server_socket.accept()
+                    # Create and start a new thread to handle this client
+                    thread = threading.Thread(target=self._handle_client, args=(client_socket, address))
+                    thread.daemon = True
+                    thread.start()
+                except socket.timeout:
+                    # The timeout allows the loop to continue and check for KeyboardInterrupt
+                    continue
         except KeyboardInterrupt:
             console.log("[bold yellow]Server shutting down...[/bold yellow]")
         finally:
             # Cleanly close all sockets when the server stops
             with self.lock:
-                # Create a copy of the list of sockets to avoid issues with dict size changing during iteration
                 client_sockets = list(self.clients.keys())
+                console.log(f"Closing {len(client_sockets)} client connection(s)...")
                 for s in client_sockets:
                     s.close()
             self.server_socket.close()
             console.log("[bold red]Server has been shut down.[/bold red]")
-            # A clean exit is preferred
             sys.exit(0)
 
 
