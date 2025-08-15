@@ -35,6 +35,9 @@ def discover_servers() -> List[str]:
     console.print("[cyan]Scanning for servers on the local network...[/cyan]")
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        # Allow multiple clients on the same machine to listen for broadcasts
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         # Bind to the discovery port to receive broadcasts
         try:
             sock.bind(("", DISCOVERY_PORT))
@@ -92,6 +95,8 @@ class ChatClient:
         self.user_list: Dict[str, str] = {}
         self.user_panel_scroll_offset: int = 0
         self.active_panel: str = "chat" # 'chat' or 'users'
+        self.unseen_messages_count: int = 0
+        self.is_scrolled_to_bottom: bool = True
 
         self.network_buffer: bytes = b""
         self.layout: Layout = self._create_layout()
@@ -139,7 +144,11 @@ class ChatClient:
         # Add a scroll indicator if not at the bottom
         is_scrolled = self.scroll_offset > 0
         title = f"Chatting as [cyan]{self.username}[/cyan]"
-        if is_scrolled:
+        
+        # Add new message notification if scrolled up and there are unseen messages
+        if not self.is_scrolled_to_bottom and self.unseen_messages_count > 0:
+            title += f" [yellow]({self.unseen_messages_count} New Messages)[/yellow]"
+        elif is_scrolled: # Original scrolled indicator
             title += f" [yellow](scrolled up {self.scroll_offset} lines)[/yellow]"
 
         border_style = "green" if self.active_panel == "chat" else "dim"
@@ -202,8 +211,15 @@ class ChatClient:
         """Adds a message to the chat history in a thread-safe manner."""
         with self._lock:
             self.chat_history.append(message)
-            # Always jump to the bottom when a new message is added
-            self.scroll_offset = 0
+            
+            # If the user is scrolled up, increment unseen messages count
+            if not self.is_scrolled_to_bottom:
+                self.unseen_messages_count += 1
+            else:
+                # If at the bottom, ensure scroll_offset is 0 and reset unseen count
+                self.scroll_offset = 0
+                self.unseen_messages_count = 0
+            
             self.ui_dirty = True # Signal that the UI needs to be updated
 
             # Optional: Trim history to prevent infinite growth
@@ -285,20 +301,37 @@ class ChatClient:
                 # Up Arrow
                 if key_code == b'H':
                     if self.active_panel == 'chat':
+                        # If scrolling up, user is no longer at the bottom
+                        if self.scroll_offset == 0: # Only set to False if they were at the bottom and now moving up
+                            self.is_scrolled_to_bottom = False
                         self.scroll_offset = min(len(self.chat_history) - 1, self.scroll_offset + 1)
                     else:
                         self.user_panel_scroll_offset = min(len(self.user_list) - 1, self.user_panel_scroll_offset + 1)
                 # Down Arrow
                 elif key_code == b'P':
                     if self.active_panel == 'chat':
+                        old_scroll_offset = self.scroll_offset
                         self.scroll_offset = max(0, self.scroll_offset - 1)
+
+                        # If we scrolled down and there are unseen messages
+                        if self.scroll_offset < old_scroll_offset and self.unseen_messages_count > 0:
+                            lines_scrolled_down = old_scroll_offset - self.scroll_offset
+                            self.unseen_messages_count = max(0, self.unseen_messages_count - lines_scrolled_down)
+
+                        # If scrolled to bottom, reset unseen messages and set flag
+                        if self.scroll_offset == 0 and old_scroll_offset > 0:
+                            self.is_scrolled_to_bottom = True
+                            self.unseen_messages_count = 0
                     else:
                         self.user_panel_scroll_offset = max(0, self.user_panel_scroll_offset - 1)
                 return
 
             # On any other key, reset focus to chat panel and handle input
             self.active_panel = "chat"
+            # When inputting text, always snap to bottom and clear notifications
             self.scroll_offset = 0
+            self.is_scrolled_to_bottom = True
+            self.unseen_messages_count = 0
             self.user_panel_scroll_offset = 0
 
             # Enter key
