@@ -54,6 +54,18 @@ class ChatServer:
                 if client_socket != sender_socket:
                     self._send_direct_message(client_socket, message)
 
+    def _broadcast_user_list(self) -> None:
+        """Constructs and broadcasts the current user list to all clients."""
+        with self.lock:
+            if not self.clients:
+                return
+            # Format: "user1(addr1),user2(addr2)"
+            user_list_str = ",".join(
+                [f"{username}({addr})" for addr, username in self.clients.values()]
+            )
+            message = f"ULIST|{user_list_str}"
+            self._broadcast(message)
+
     def _send_direct_message(self, client_socket: socket.socket, message: str) -> None:
         """Sends a newline-terminated message directly to a single client."""
         try:
@@ -80,6 +92,7 @@ class ChatServer:
                 notification = f"SRV|{username} has left the chat."
                 self.message_history.append(notification)
                 self._broadcast(notification)
+                self._broadcast_user_list()
 
     def _handle_client(self, client_socket: socket.socket, address: Tuple[str, int]) -> None:
         """
@@ -92,21 +105,19 @@ class ChatServer:
         addr_str = f"{address[0]}:{address[1]}"
         console.log(f"[bold green]New connection from {addr_str}.[/bold green]")
         
-        # Set a default username and add the client to the dictionary
         with self.lock:
             username = f"User_{addr_str}"
             self.clients[client_socket] = (addr_str, username)
 
-            # Send a welcome message and the chat history to the new client
             self._send_direct_message(client_socket, "SRV|Welcome! Here are the recent messages:")
             for msg in self.message_history:
                 self._send_direct_message(client_socket, msg)
         
-        # Announce the new user to all other clients and log the event
         join_notification = f"SRV|{username} has joined the chat."
         with self.lock:
             self.message_history.append(join_notification)
         self._broadcast(join_notification, client_socket)
+        self._broadcast_user_list() # Send initial user list
 
         try:
             while True:
@@ -114,7 +125,10 @@ class ChatServer:
                 if not data:
                     break
 
-                message = data.decode('utf-8')
+                message = data.decode('utf-8').strip()
+                if not message:
+                    continue
+
                 parts = message.split('|', 1)
                 msg_type = parts[0]
                 payload = parts[1] if len(parts) > 1 else ""
@@ -123,10 +137,11 @@ class ChatServer:
                     with self.lock:
                         old_username = self.clients[client_socket][1]
                         self.clients[client_socket] = (addr_str, payload)
-                        username = payload # Update local username variable
+                        username = payload
                     notification = f"SRV|{old_username} is now known as {username}."
                     console.log(f"[yellow]{notification}[/yellow]")
                     self._broadcast(notification)
+                    self._broadcast_user_list() # Send updated user list
 
                 elif msg_type == "MSG":
                     console.log(f"[cyan]{payload}[/cyan]")
