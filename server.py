@@ -21,8 +21,6 @@ BROADCAST_INTERVAL_S = 5
 # ---------------------------------- #
 
 class ChatServer:
-
-class ChatServer:
     """
     A multi-threaded TCP chat server.
 
