@@ -42,6 +42,8 @@ class ChatClient:
         
         # UI State
         self.input_buffer: str = ""
+        self.scroll_offset: int = 0
+        self.ui_dirty: bool = True # Flag to trigger UI updates
         self.layout: Layout = self._create_layout()
 
     def _create_layout(self) -> Layout:
@@ -66,13 +68,31 @@ class ChatClient:
         return layout
 
     def _get_chat_panel(self) -> Panel:
-        """Creates the chat history panel."""
+        """Creates the chat history panel, respecting the scroll offset."""
         with self._lock:
-            # The visible chat history
-            chat_group = Group(*self.chat_history)
+            # Calculate the visible portion of the chat history
+            panel_height = console.height - 6  # Adjust for header/footer
+            
+            # Prevent negative panel height
+            if panel_height < 1:
+                return Panel(Group(), title=f"Chatting as [cyan]{self.username}[/cyan]", border_style="green", expand=True)
+
+            # Calculate the slice of history to show
+            end_index = len(self.chat_history) - self.scroll_offset
+            start_index = max(0, end_index - panel_height)
+            
+            visible_history = self.chat_history[start_index:end_index]
+            chat_group = Group(*visible_history)
+
+        # Add a scroll indicator if not at the bottom
+        is_scrolled = self.scroll_offset > 0
+        title = f"Chatting as [cyan]{self.username}[/cyan]"
+        if is_scrolled:
+            title += f" [yellow](scrolled up {self.scroll_offset} lines)[/yellow]"
+
         return Panel(
             chat_group,
-            title=f"Chatting as [cyan]{self.username}[/cyan]",
+            title=title,
             border_style="green",
             expand=True,
         )
@@ -93,8 +113,15 @@ class ChatClient:
         """Adds a message to the chat history in a thread-safe manner."""
         with self._lock:
             self.chat_history.append(message)
+            # If the user is not scrolled up, keep them at the bottom
+            if self.scroll_offset > 0:
+                # If they are scrolled up, increment the offset to keep their view stable
+                self.scroll_offset += 1
+            
+            self.ui_dirty = True # Signal that the UI needs to be updated
+
             # Optional: Trim history to prevent infinite growth
-            if len(self.chat_history) > 1000:
+            if len(self.chat_history) > 2000:
                 self.chat_history.pop(0)
 
     def _receive_messages(self) -> None:
@@ -138,7 +165,27 @@ class ChatClient:
     def _handle_input_windows(self) -> None:
         """Handles non-blocking keyboard input on Windows."""
         if msvcrt.kbhit():
+            # An input event occurred, so the UI will need to be redrawn
+            self.ui_dirty = True
+
             char = msvcrt.getch()
+
+            # Special keys (like arrows) are sent as two bytes.
+            # The first is \xe0 (224) or \x00.
+            if char in [b'\xe0', b'\x00']:
+                # Read the next byte to get the actual key code
+                key_code = msvcrt.getch()
+                # Up Arrow
+                if key_code == b'H':
+                    self.scroll_offset = min(len(self.chat_history) - 1, self.scroll_offset + 1)
+                # Down Arrow
+                elif key_code == b'P':
+                    self.scroll_offset = max(0, self.scroll_offset - 1)
+                return # Ignore other special keys for now
+
+            # Reset scroll on any other action to see what you're doing
+            self.scroll_offset = 0
+
             # Enter key
             if char == b'\r':
                 if self.input_buffer:
@@ -196,11 +243,13 @@ class ChatClient:
                     # Handle keyboard input
                     self._handle_input_windows()
                     
-                    # Update and refresh the layout
-                    self._update_layout()
+                    # Only update the layout if something has changed
+                    if self.ui_dirty:
+                        self._update_layout()
+                        self.ui_dirty = False # Reset the flag
                     
                     # Small sleep to prevent busy-waiting and save CPU
-                    time.sleep(0.05)
+                    time.sleep(0.01)
 
         except ConnectionRefusedError:
             console.print(f"[bold red]Connection failed. Is the server running at {self.host}:{self.port}?[/bold red]")

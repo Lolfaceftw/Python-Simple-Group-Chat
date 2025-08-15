@@ -1,8 +1,10 @@
 # server.py
 
 import socket
+import sys
 import threading
-from typing import Dict, Tuple
+from collections import deque
+from typing import Deque, Dict, Tuple
 
 from rich.console import Console
 from rich.panel import Panel
@@ -32,7 +34,9 @@ class ChatServer:
         self.server_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # A dictionary to store connected clients {socket: (address, username)}
         self.clients: Dict[socket.socket, Tuple[str, str]] = {}
-        # A lock to ensure thread-safe access to the clients dictionary
+        # A deque to store the last 50 messages for new clients
+        self.message_history: Deque[str] = deque(maxlen=50)
+        # A lock to ensure thread-safe access to shared resources
         self.lock: threading.RLock = threading.RLock()
 
     def _broadcast(self, message: str, sender_socket: socket.socket = None) -> None:
@@ -53,6 +57,13 @@ class ChatServer:
                     except socket.error:
                         # If sending fails, assume the client is disconnected and handle it
                         self._remove_client(client_socket)
+
+    def _send_direct_message(self, client_socket: socket.socket, message: str) -> None:
+        """Sends a message directly to a single client."""
+        try:
+            client_socket.send(message.encode('utf-8'))
+        except socket.error:
+            self._remove_client(client_socket)
 
     def _remove_client(self, client_socket: socket.socket) -> None:
         """
@@ -77,31 +88,31 @@ class ChatServer:
         """
         Handles communication with a single client in a dedicated thread.
 
-        Listens for messages, processes them, and handles client disconnection.
-
         Args:
-            client_socket (socket.socket): The socket object for the connected client.
-            address (Tuple[str, int]): The address tuple (host, port) of the client.
+            client_socket (socket.socket): The socket for the connected client.
+            address (Tuple[str, int]): The address tuple of the client.
         """
         addr_str = f"{address[0]}:{address[1]}"
-        username = f"User_{addr_str}" # Default username
-
+        console.log(f"[bold green]New connection from {addr_str}.[/bold green]")
+        
+        # Set a default username and add the client to the dictionary
         with self.lock:
+            username = f"User_{addr_str}"
             self.clients[client_socket] = (addr_str, username)
 
-        console.log(f"[bold green]New connection from {addr_str}.[/bold green]")
+            # Send a welcome message and the chat history to the new client
+            self._send_direct_message(client_socket, "SRV|Welcome! Here are the recent messages:")
+            for msg in self.message_history:
+                self._send_direct_message(client_socket, msg)
         
         # Announce the new user to all other clients
         join_notification = f"SRV|{username} has joined the chat."
         self._broadcast(join_notification, client_socket)
 
-
         try:
             while True:
-                # Receive data from the client (up to 4096 bytes)
                 data = client_socket.recv(4096)
                 if not data:
-                    # Empty data means the client has closed the connection
                     break
 
                 message = data.decode('utf-8')
@@ -113,19 +124,21 @@ class ChatServer:
                     with self.lock:
                         old_username = self.clients[client_socket][1]
                         self.clients[client_socket] = (addr_str, payload)
-                    notification = f"SRV|{old_username} is now known as {payload}."
+                        username = payload # Update local username variable
+                    notification = f"SRV|{old_username} is now known as {username}."
                     console.log(f"[yellow]{notification}[/yellow]")
                     self._broadcast(notification)
 
                 elif msg_type == "MSG":
-                    # Broadcast chat message to other clients
                     console.log(f"[cyan]{payload}[/cyan]")
-                    self._broadcast(f"MSG|{payload}", client_socket)
+                    full_message = f"MSG|{payload}"
+                    with self.lock:
+                        self.message_history.append(full_message)
+                    self._broadcast(full_message, client_socket)
 
         except (ConnectionResetError, BrokenPipeError):
             console.log(f"[bold red]Connection lost with {username} ({addr_str}).[/bold red]")
         finally:
-            # Ensure client is removed on any exit path
             self._remove_client(client_socket)
 
     def start(self) -> None:
@@ -154,10 +167,14 @@ class ChatServer:
         finally:
             # Cleanly close all sockets when the server stops
             with self.lock:
-                for s in self.clients:
+                # Create a copy of the list of sockets to avoid issues with dict size changing during iteration
+                client_sockets = list(self.clients.keys())
+                for s in client_sockets:
                     s.close()
             self.server_socket.close()
             console.log("[bold red]Server has been shut down.[/bold red]")
+            # A clean exit is preferred
+            sys.exit(0)
 
 
 if __name__ == "__main__":
