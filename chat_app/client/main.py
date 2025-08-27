@@ -84,7 +84,7 @@ def main() -> None:
     console = Console()
     
     # Set up logging
-    setup_logging(level=logging.INFO)
+    setup_logging(level="INFO")
     logger = logging.getLogger(__name__)
     
     console.print(Panel("[bold cyan]Welcome to the Python Chat Client![/bold cyan]", border_style="cyan"))
