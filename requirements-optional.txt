@@ -1,0 +1,12 @@
+# Optional dependencies for enhanced functionality
+# Install with: pip install -r requirements.txt -r requirements-optional.txt
+
+# YAML configuration support
+PyYAML>=6.0,<7.0
+
+# System monitoring and health checks
+psutil>=5.9.0,<6.0
+
+# Additional monitoring tools (for production)
+# prometheus-client>=0.16.0,<1.0  # For Prometheus metrics export
+# structlog>=23.0.0,<24.0  # For structured logging

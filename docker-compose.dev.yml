@@ -1,0 +1,57 @@
+# Development Docker Compose configuration
+
+version: '3.8'
+
+services:
+  chat-server-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+      target: builder  # Use builder stage for development
+    container_name: chat-server-dev
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      - CHAT_SERVER_HOST=0.0.0.0
+      - CHAT_SERVER_PORT=8080
+      - CHAT_DISCOVERY_PORT=8081
+      - CHAT_LOG_LEVEL=DEBUG
+      - CHAT_LOG_JSON=false
+      - CHAT_LOG_COLORS=true
+      - CHAT_MAX_CLIENTS=10
+      - CHAT_RATE_LIMIT_MSG_PER_MIN=120
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+      - ./config:/app/config
+    networks:
+      - chat-network-dev
+    restart: "no"
+    command: ["python", "-m", "chat_app.server.main"]
+
+  # Development client for testing
+  chat-client-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+      target: builder
+    container_name: chat-client-dev
+    environment:
+      - CHAT_CLIENT_HOST=chat-server-dev
+      - CHAT_CLIENT_PORT=8080
+      - CHAT_LOG_LEVEL=DEBUG
+      - CHAT_LOG_COLORS=true
+    volumes:
+      - .:/app
+    depends_on:
+      - chat-server-dev
+    networks:
+      - chat-network-dev
+    stdin_open: true
+    tty: true
+    command: ["python", "-m", "chat_app.client.main"]
+
+networks:
+  chat-network-dev:
+    driver: bridge

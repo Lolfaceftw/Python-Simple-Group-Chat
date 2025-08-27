@@ -1,1 +1,7 @@
-rich
+# Core dependencies for the chat application
+rich>=13.0.0,<14.0.0
+
+# Optional dependencies for enhanced functionality
+# Install with: pip install -r requirements.txt -r requirements-optional.txt
+# PyYAML>=6.0,<7.0  # For YAML configuration support
+# psutil>=5.9.0,<6.0  # For system monitoring and health checks

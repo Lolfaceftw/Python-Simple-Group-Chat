@@ -1,0 +1,22 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "max_clients": 10,
+    "rate_limit_messages_per_minute": 120,
+    "max_message_length": 1000,
+    "max_username_length": 50,
+    "max_connections_per_ip": 3,
+    "message_history_size": 100,
+    "discovery_port": 8081,
+    "discovery_broadcast_interval": 5
+  },
+  "client": {
+    "default_host": "127.0.0.1",
+    "default_port": 8080,
+    "discovery_timeout": 3,
+    "ui_refresh_rate": 30,
+    "reconnect_attempts": 5,
+    "reconnect_delay": 2
+  }
+}

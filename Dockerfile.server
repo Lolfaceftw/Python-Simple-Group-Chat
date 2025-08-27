@@ -1,0 +1,52 @@
+# Dockerfile specifically for the chat server
+
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r chatserver && useradd -r -g chatserver chatserver
+
+# Create application directory
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY requirements.txt requirements-optional.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-optional.txt
+
+# Copy application code
+COPY chat_app ./chat_app
+COPY config.example.json config.example.yaml ./
+
+# Install the application
+RUN pip install --no-cache-dir .
+
+# Create directories and set permissions
+RUN mkdir -p /app/logs /app/config && \
+    chown -R chatserver:chatserver /app
+
+# Switch to non-root user
+USER chatserver
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost', 8080)); s.close()" || exit 1
+
+# Expose ports
+EXPOSE 8080 8081
+
+# Set default environment variables
+ENV CHAT_SERVER_HOST=0.0.0.0 \
+    CHAT_SERVER_PORT=8080 \
+    CHAT_DISCOVERY_PORT=8081 \
+    CHAT_LOG_LEVEL=INFO
+
+# Run the server
+CMD ["chat-server"]

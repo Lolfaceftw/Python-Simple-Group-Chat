@@ -1,0 +1,36 @@
+# Chat Application Configuration Example
+# Copy this file to config.yaml and modify as needed
+
+server:
+  # Server binding configuration
+  host: "0.0.0.0"  # Bind to all interfaces (use "127.0.0.1" for localhost only)
+  port: 8080       # Main chat server port
+  
+  # Client limits
+  max_clients: 100                    # Maximum concurrent clients
+  max_connections_per_ip: 5           # Maximum connections per IP address
+  
+  # Security settings
+  rate_limit_messages_per_minute: 60  # Messages per minute per client
+  max_message_length: 1000            # Maximum message length in characters
+  max_username_length: 50             # Maximum username length in characters
+  
+  # Server features
+  message_history_size: 50            # Number of messages to keep in history
+  
+  # Service discovery
+  discovery_port: 8081                # UDP port for service discovery
+  discovery_broadcast_interval: 5     # Seconds between discovery broadcasts
+
+client:
+  # Default connection settings
+  default_host: "127.0.0.1"  # Default server to connect to
+  default_port: 8080         # Default server port
+  
+  # Network settings
+  discovery_timeout: 3       # Seconds to wait for server discovery
+  reconnect_attempts: 3      # Number of reconnection attempts
+  reconnect_delay: 5         # Seconds between reconnection attempts
+  
+  # UI settings
+  ui_refresh_rate: 20        # UI refresh rate in Hz
