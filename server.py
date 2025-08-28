@@ -239,13 +239,14 @@ class ChatServer:
                             continue
                     
                     # Generic fallback
-                    targets.update({'<broadcast', '255.255.255.255'})
+                    targets.update({'<broadcast>', '255.255.255.255'})
                     
                     # Send discovery
                     for bcast in targets:
                         try:
                             sock.sendto(DISCOVERY_MESSAGE, (bcast, DISCOVERY_PORT))
-                        except Exception:
+                        except Exception as e:
+                            console.log(f"[dim]Discovery send failed for {bcast}: {e}[/dim]")
                             continue
                     time.sleep(BROADCAST_INTERVAL_S)
                 except Exception as e:
