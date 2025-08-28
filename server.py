@@ -4,6 +4,7 @@ import socket
 import sys
 import threading
 import time
+import netifaces
 from collections import deque
 from typing import Deque, Dict, Tuple
 
@@ -213,18 +214,40 @@ class ChatServer:
             sys.exit(0)
 
     def _broadcast_presence(self) -> None:
-        """Periodically broadcasts a discovery message on the local network."""
+        """
+        Periodically broadcasts a discovery message to all network interfaces.
+        This is more robust than a single broadcast as it targets all subnets
+        the server is connected to.
+        """
         # Create a UDP socket for broadcasting
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
             # Set the socket to allow broadcasting
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            # Use the broadcast address for the local network
-            broadcast_address = ('<broadcast>', DISCOVERY_PORT)
             console.log(f"Starting service discovery broadcast on port {DISCOVERY_PORT}")
 
             while True:
                 try:
-                    sock.sendto(DISCOVERY_MESSAGE, broadcast_address)
+                    #  Collect  broadcast targets from all IPv4 addresses on all interfaces.
+                    targets = set()
+                    for iface in netifaces.interfaces():
+                        try:
+                            for addr in netifaces.ifaddresses(iface).get(netifaces.AF_INET, []):
+                                bcast = addr.get('broadcast')
+                                if bcast: targets.add(bcast)
+                        except Exception:
+                            # Ignore ifaces that fail.
+                            continue
+                    
+                    # Generic fallback
+                    targets.update({'<broadcast>', '255.255.255.255'})
+                    
+                    # Send discovery
+                    for bcast in targets:
+                        try:
+                            sock.sendto(DISCOVERY_MESSAGE, (bcast, DISCOVERY_PORT))
+                        except Exception as e:
+                            console.log(f"[dim]Discovery send failed for {bcast}: {e}[/dim]")
+                            continue
                     time.sleep(BROADCAST_INTERVAL_S)
                 except Exception as e:
                     console.log(f"[bold red]Discovery broadcast failed: {e}[/bold red]")
