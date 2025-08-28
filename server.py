@@ -227,25 +227,26 @@ class ChatServer:
 
             while True:
                 try:
-                    # Iterate through all network interfaces
+                    #  Collect  broadcast targets from all IPv4 addresses on all interfaces.
+                    targets = set()
                     for iface in netifaces.interfaces():
                         try:
-                            # Get the IPv4 address details for the interface
-                            addrs = netifaces.ifaddresses(iface)
-                            if netifaces.AF_INET in addrs:
-                                # Get the broadcast address for this interface's subnet
-                                broadcast_addr = addrs[netifaces.AF_INET][0].get('broadcast')
-                                if broadcast_addr:
-                                    # Send the discovery message to the specific broadcast address
-                                    sock.sendto(DISCOVERY_MESSAGE, (broadcast_addr, DISCOVERY_PORT))
+                            for addr in netifaces.ifaddresses(iface).get(netifaces.AF_INET, []):
+                                bcast = addr.get('broadcast')
+                                if bcast: targets.add(bcast)
                         except Exception:
-                            # Ignore interfaces that fail (e.g., virtual ones with no broadcast)
+                            # Ignore ifaces that fail.
                             continue
                     
-                    # Also send to the generic broadcast address as a fallback
-                    sock.sendto(DISCOVERY_MESSAGE, ('<broadcast>', DISCOVERY_PORT))
-                    sock.sendto(DISCOVERY_MESSAGE, ('255.255.255.255', DISCOVERY_PORT))
-
+                    # Generic fallback
+                    targets.update({'<broadcast', '255.255.255.255'})
+                    
+                    # Send discovery
+                    for bcast in targets:
+                        try:
+                            sock.sendto(DISCOVERY_MESSAGE, (bcast, DISCOVERY_PORT))
+                        except Exception:
+                            continue
                     time.sleep(BROADCAST_INTERVAL_S)
                 except Exception as e:
                     console.log(f"[bold red]Discovery broadcast failed: {e}[/bold red]")
