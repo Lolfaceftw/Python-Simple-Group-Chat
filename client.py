@@ -35,15 +35,28 @@ def discover_servers() -> List[str]:
     console.print("[cyan]Scanning for servers on the local network...[/cyan]")
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        # Allow multiple clients on the same machine to listen for broadcasts
+        # Set socket options to allow multiple clients to listen on the same port.
+        # SO_REUSEADDR allows binding to a port that is in a TIME_WAIT state.
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+        # SO_REUSEPORT allows multiple sockets to be bound to the exact same
+        # address and port. This is key for allowing multiple clients on the
+        # same machine to discover the server simultaneously.
+        # This option is not available on Windows.
+        if hasattr(socket, "SO_REUSEPORT"):
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError as e:
+                # This might fail on systems that define the constant but don't fully support it.
+                console.log(f"[yellow]Could not set SO_REUSEPORT: {e}[/yellow]")
+
+        else: console.print("h")
         # Bind to the discovery port to receive broadcasts
         try:
             sock.bind(("", DISCOVERY_PORT))
         except OSError as e:
             console.print(f"[bold red]Error: Could not bind to port {DISCOVERY_PORT} for discovery. {e}[/bold red]")
-            console.print("[yellow]Hint: Is another client already running?[/yellow]")
+            console.print("[yellow]Hint: Is another client already running or is the port in use?[/yellow]")
             return []
         
         # Listen for a few seconds
