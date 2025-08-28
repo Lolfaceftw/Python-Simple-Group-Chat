@@ -4,6 +4,7 @@ import socket
 import sys
 import threading
 import time
+import netifaces
 from collections import deque
 from typing import Deque, Dict, Tuple
 
@@ -213,18 +214,37 @@ class ChatServer:
             sys.exit(0)
 
     def _broadcast_presence(self) -> None:
-        """Periodically broadcasts a discovery message on the local network."""
+        """
+        Periodically broadcasts a discovery message to all network interfaces.
+        This is more robust than a single broadcast as it targets all subnets
+        the server is connected to.
+        """
         # Create a UDP socket for broadcasting
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
             # Set the socket to allow broadcasting
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            # Use the broadcast address for the local network
-            broadcast_address = ('<broadcast>', DISCOVERY_PORT)
             console.log(f"Starting service discovery broadcast on port {DISCOVERY_PORT}")
 
             while True:
                 try:
-                    sock.sendto(DISCOVERY_MESSAGE, broadcast_address)
+                    # Iterate through all network interfaces
+                    for iface in netifaces.interfaces():
+                        try:
+                            # Get the IPv4 address details for the interface
+                            addrs = netifaces.ifaddresses(iface)
+                            if netifaces.AF_INET in addrs:
+                                # Get the broadcast address for this interface's subnet
+                                broadcast_addr = addrs[netifaces.AF_INET][0].get('broadcast')
+                                if broadcast_addr:
+                                    # Send the discovery message to the specific broadcast address
+                                    sock.sendto(DISCOVERY_MESSAGE, (broadcast_addr, DISCOVERY_PORT))
+                        except Exception:
+                            # Ignore interfaces that fail (e.g., virtual ones with no broadcast)
+                            continue
+                    
+                    # Also send to the generic broadcast address as a fallback
+                    sock.sendto(DISCOVERY_MESSAGE, ('<broadcast>', DISCOVERY_PORT))
+
                     time.sleep(BROADCAST_INTERVAL_S)
                 except Exception as e:
                     console.log(f"[bold red]Discovery broadcast failed: {e}[/bold red]")
