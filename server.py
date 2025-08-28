@@ -244,6 +244,7 @@ class ChatServer:
                     
                     # Also send to the generic broadcast address as a fallback
                     sock.sendto(DISCOVERY_MESSAGE, ('<broadcast>', DISCOVERY_PORT))
+                    sock.sendto(DISCOVERY_MESSAGE, ('255.255.255.255', DISCOVERY_PORT))
 
                     time.sleep(BROADCAST_INTERVAL_S)
                 except Exception as e:

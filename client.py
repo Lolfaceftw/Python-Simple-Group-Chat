@@ -24,10 +24,10 @@ else:
 # --- Service Discovery Protocol --- #
 DISCOVERY_PORT = 8081
 DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
-DISCOVERY_TIMEOUT_S = 3
+DISCOVERY_TIMEOUT_S = 5
 # ---------------------------------- #
 
-VERSION = 1.1
+VERSION = "1.1"
 
 console = Console()
 
