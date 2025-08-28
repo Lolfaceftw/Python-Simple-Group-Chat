@@ -165,9 +165,19 @@ class ChatServer:
 
     def start(self) -> None:
         """
-        Binds the server and starts the main loop with a timeout.
-        This allows the server to listen for connections while still being
-        able to gracefully shut down on a KeyboardInterrupt.
+        Start the TCP server: bind to the configured host/port, accept incoming connections,
+        and run the main accept loop until interrupted.
+        
+        This method:
+        - Binds the listening socket and begins listening for connections.
+        - Sets a 1.0s socket timeout so the accept loop can periodically check for KeyboardInterrupt.
+        - Starts the UDP service-discovery broadcaster in a daemon thread.
+        - Accepts incoming TCP connections and spawns a daemon thread running _handle_client for each.
+        - On KeyboardInterrupt performs an orderly shutdown: closes all client sockets, closes the server socket, logs shutdown status, and exits the process.
+        
+        Error conditions:
+        - If bind/listen fails (OSError) the method prints an error/hint and returns without starting the accept loop.
+        - The method exits the process with status 0 after completing shutdown.
         """
         try:
             self.server_socket.bind((self.host, self.port))
@@ -215,9 +225,22 @@ class ChatServer:
 
     def _broadcast_presence(self) -> None:
         """
-        Periodically broadcasts a discovery message to all network interfaces.
-        This is more robust than a single broadcast as it targets all subnets
-        the server is connected to.
+        Broadcast the server's presence periodically to all IPv4 subnets reachable from the host.
+        
+        This long-running method sends DISCOVERY_MESSAGE via UDP to each network interface's IPv4
+        broadcast address (when available) and also to the generic '<broadcast>' address as a fallback.
+        It loops indefinitely, sleeping BROADCAST_INTERVAL_S between successful rounds. Per-interface
+        errors are ignored so a problematic or non-broadcast-capable interface does not stop discovery;
+        unexpected exceptions are caught, logged, and cause a longer sleep interval (2 * BROADCAST_INTERVAL_S)
+        to avoid busy-looping.
+        
+        Side effects:
+        - Performs network I/O on a UDP socket with broadcasting enabled.
+        - Logs failures via the module's console logger.
+        
+        Notes:
+        - Requires netifaces to enumerate interfaces and obtain per-interface IPv4 broadcast addresses.
+        - Intended to run in its own thread or as a daemon task.
         """
         # Create a UDP socket for broadcasting
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
