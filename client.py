@@ -27,6 +27,8 @@ DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
 DISCOVERY_TIMEOUT_S = 3
 # ---------------------------------- #
 
+VERSION = 1.0
+
 console = Console()
 
 def discover_servers() -> List[str]:
@@ -50,7 +52,7 @@ def discover_servers() -> List[str]:
                 # This might fail on systems that define the constant but don't fully support it.
                 console.log(f"[yellow]Could not set SO_REUSEPORT: {e}[/yellow]")
 
-        else: console.print("h")
+
         # Bind to the discovery port to receive broadcasts
         try:
             sock.bind(("", DISCOVERY_PORT))
@@ -396,7 +398,7 @@ class ChatClient:
 
 
 if __name__ == "__main__":
-    console.print(Panel("[bold cyan]Welcome to the Python Chat Client![/bold cyan]", border_style="cyan"))
+    console.print(Panel(f"[bold cyan]Welcome to the Python Group Chat Client!\nVersion: {VERSION}[/bold cyan]", border_style="cyan"))
     try:
         # Discover servers on the network first
         available_servers = discover_servers()
