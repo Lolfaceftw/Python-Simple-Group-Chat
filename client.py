@@ -100,7 +100,7 @@ def scan_and_probe_ports(host: str) -> Dict[int, str]:
         A dictionary mapping the port number to its status ("Joinable" or "Open").
     """
     results = {}
-    scan_range = range(4000, 65536)
+    scan_range = range(0, 65536)
     lock = threading.Lock()
 
     progress = Progress(
@@ -274,7 +274,7 @@ class ChatClient:
                     user_texts.append(Text(username))
             
             if self.user_panel_scroll_offset > 0:
-                title += f" [yellow](scrolled)[/gyellow]"
+                title += f" [yellow](scrolled)[/yellow]"
             
             panel_content = Group(*user_texts)
         else:

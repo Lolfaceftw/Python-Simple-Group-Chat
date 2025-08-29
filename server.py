@@ -173,26 +173,46 @@ class ChatServer:
                     msg_type = parts[0]
                     payload = parts[1] if len(parts) > 1 else ""
 
+# server.py
                     if msg_type == "CMD_USER":
-                        with self.lock:
-                            old_username = self.clients[client_socket][1]
+                        # --- Atomic Nickname Validation and Update ---
+                        direct_message = None
+                        notification = None
+                        name_changed = False
+                        old_username_local = ""
 
-                        if old_username.lower() == payload.lower():
-                            self._send_direct_message(client_socket, "SRV|Did you even change your name?")
-                        elif self._is_username_taken(payload, client_socket):
-                            self._send_direct_message(client_socket, f"SRV|Nickname '{payload}' is already taken.")
-                        else:
-                            with self.lock:
-                                self.clients[client_socket] = (addr_str, payload)
-                                username = payload
+                        with self.lock:
+                            old_username_local = self.clients[client_socket][1]
                             
-                            # If this is the first name being set, announce "join". Otherwise, announce "is now known as".
-                            if not client_announced:
-                                notification = f"SRV|{username} has joined the chat."
-                                client_announced = True
+                            if old_username_local.lower() == payload.lower():
+                                direct_message = "SRV|Did you even change your name?"
                             else:
-                                notification = f"SRV|{old_username} is now known as {username}."
-                            
+                                # Atomically check if the name is taken by another user
+                                is_taken = any(
+                                    existing_socket != client_socket and existing_username.lower() == payload.lower()
+                                    for existing_socket, (_, existing_username) in self.clients.items()
+                                )
+                                
+                                if is_taken:
+                                    direct_message = f"SRV|Nickname '{payload}' is already taken."
+                                else:
+                                    # If free, update the name within the same locked block
+                                    self.clients[client_socket] = (addr_str, payload)
+                                    username = payload
+                                    name_changed = True
+                                    
+                                    # Determine the correct notification message
+                                    if not client_announced:
+                                        notification = f"SRV|{username} has joined the chat."
+                                        client_announced = True
+                                    else:
+                                        notification = f"SRV|{old_username_local} is now known as {username}."
+                        
+                        # --- Perform all network I/O outside the lock ---
+                        if direct_message:
+                            self._send_direct_message(client_socket, direct_message)
+                        
+                        if name_changed and notification:
                             console.log(f"[yellow]{notification}[/yellow]")
                             self._broadcast(notification)
                             self._broadcast_user_list()
