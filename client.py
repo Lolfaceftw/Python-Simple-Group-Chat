@@ -446,15 +446,24 @@ if __name__ == "__main__":
     try:
         # Discover servers on the network first
         available_servers = discover_servers()
+        manual_entry_option = "Enter IP manually..."
 
-        # Use a dropdown if servers are found, otherwise a normal prompt
         if available_servers:
-            server_ip = Prompt.ask(
-                "[cyan]Enter Server IP[/cyan]",
-                choices=available_servers,
-                default=available_servers[0]
+            # Add the manual entry option to the list of choices
+            choices = available_servers + [manual_entry_option]
+            
+            selection = Prompt.ask(
+                "[cyan]Select a discovered server or enter one manually[/cyan]",
+                choices=choices,
+                default=choices[0]
             )
+
+            if selection == manual_entry_option:
+                server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
+            else:
+                server_ip = selection
         else:
+            # If no servers are found, just ask for the IP directly
             server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
 
         server_port_str = Prompt.ask("[cyan]Enter Server Port[/cyan]", default="8080")
