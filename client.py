@@ -12,6 +12,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.text import Text
+from rich.table import Table
 
 # Platform-specific imports for non-blocking keyboard input
 if sys.platform == "win32":
@@ -83,42 +84,65 @@ def discover_servers() -> List[str]:
 
     return server_list
 
-def discover_ports(host: str) -> List[int]:
-    """Scans a target IP for open ports in a common range."""
-    open_ports = []
-    # Scan a common range of user ports to keep it fast
-    scan_range = range(6000, 65535) 
+def scan_and_probe_ports(host: str) -> Dict[int, str]:
+    """
+    Scans for open ports and probes them to identify any text-based service.
+
+    Returns:
+        A dictionary mapping the port number to its status ("Joinable" or "Open").
+    """
+    results = {}
+    # We can use a slightly wider common range for general text services
+    scan_range = range(1024, 65535) 
     
-    with console.status(f"[cyan]Scanning {host} for open ports...[/cyan]", spinner="dots"):
-        # Use a thread pool to speed up scanning
+    with console.status(f"[cyan]Scanning and probing {host} for text-based services...[/cyan]", spinner="dots"):
         threads = []
         lock = threading.Lock()
 
-        def scan_port(port):
+        def probe_port(port):
+            status = ""
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(0.5)  # Set a short timeout
+                    sock.settimeout(1.0) # Use a reasonable timeout
                     if sock.connect_ex((host, port)) == 0:
-                        with lock:
-                            open_ports.append(port)
+                        status = "Open"  # Mark as open by default
+                        try:
+                            # Listen for any initial banner or welcome message.
+                            response = sock.recv(1024)
+                            
+                            # If we receive ANY data and it can be decoded as text,
+                            # we'll consider it a joinable text-based server.
+                            if response:
+                                response.decode('utf-8') # This will fail if the data is binary
+                                status = "Joinable"
+                        except (socket.timeout, UnicodeDecodeError, ConnectionResetError):
+                            # If it times out, sends binary data, or resets the connection,
+                            # it's not a simple text-based server. It remains "Open".
+                            pass
             except socket.error:
-                pass # Ignore connection errors
+                pass  # Ignore connection errors
+            
+            if status:
+                with lock:
+                    results[port] = status
 
         for port in scan_range:
-            thread = threading.Thread(target=scan_port, args=(port,))
+            thread = threading.Thread(target=probe_port, args=(port,))
             threads.append(thread)
             thread.start()
 
         for thread in threads:
-            thread.join() # Wait for all threads to complete
+            thread.join()
 
-    open_ports.sort() # Sort the results for better presentation
-    if open_ports:
-        console.print(f"[green]Found potential server ports on {host}: {', '.join(map(str, open_ports))}[/green]")
+    sorted_results = dict(sorted(results.items()))
+    
+    if sorted_results:
+        joinable_count = list(sorted_results.values()).count("Joinable")
+        console.print(f"[green]Scan complete on {host}. Found {len(sorted_results)} open port(s), with {joinable_count} identified as joinable text-based servers.[/green]")
     else:
-        console.print(f"[yellow]No open ports found in the range {scan_range.start}-{scan_range.stop-1}. You may need to enter the port manually.[/yellow]")
+        console.print(f"[yellow]No open ports found in the range {scan_range.start}-{scan_range.stop-1}.[/yellow]")
         
-    return open_ports
+    return sorted_results
 
 class ChatClient:
     """
@@ -131,7 +155,8 @@ class ChatClient:
         """
         self.host: str = host
         self.port: int = port
-        self.username: str = "Connecting..." # A temporary name
+        self.username: str = "Guest" # A temporary name
+        self.is_rich_server: bool = False # Flag to track if the server supports ULIST
         self.client_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.is_running: bool = False
         self.chat_history: List[Text] = []
@@ -409,11 +434,10 @@ class ChatClient:
 
     def start(self) -> None:
         """
-        Connects, validates username, and then starts the main UI and I/O loops.
+        Connects, determines server type, handles username, and starts the main UI.
         """
         if sys.platform != "win32":
             console.print("[bold red]This UI is currently only supported on Windows.[/bold red]")
-            console.print("A future version will add support for macOS and Linux.")
             return
 
         try:
@@ -425,38 +449,38 @@ class ChatClient:
             receive_thread.daemon = True
             receive_thread.start()
 
-            # Wait for the server to send the initial user list, with a timeout
-            with console.status("[cyan]Finalizing connection...[/cyan]"):
-                if not self.initial_user_list_received.wait(timeout=10.0):
-                    console.print("[bold red]Error: Did not receive user list from server.[/bold red]")
-                    self.is_running = False
-                    self.client_socket.close()
-                    return
-
-            # --- Username Prompting and Validation Loop ---
-            while self.is_running:
-                chosen_username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
-                if not chosen_username:
-                    console.print("[bold red]Nickname cannot be empty.[/bold red]")
-                    continue
-
-                is_taken = False
-                with self._lock:
-                    for existing_user in self.user_list.keys():
-                        if existing_user.lower() == chosen_username.lower():
-                            is_taken = True
-                            break
-                
-                if is_taken:
-                    console.print(f"[bold red]Nickname '{chosen_username}' is already in use. Please choose another.[/bold red]")
+            # Wait briefly to see if the server sends a ULIST, identifying it as "rich"
+            with console.status("[cyan]Checking server capabilities...[/cyan]"):
+                if self.initial_user_list_received.wait(timeout=3.0):
+                    self.is_rich_server = True
+                    console.print("[green]Rich server detected (supports user lists).[/green]")
                 else:
-                    self.username = chosen_username
-                    self._send_message(f"CMD_USER|{self.username}")
-                    break # Success, exit the prompt loop
-            
-            if not self.is_running: # Handle potential shutdown during prompt
+                    console.print("[yellow]Basic server detected. Nickname validation will be skipped.[/yellow]")
+
+            # --- Username Prompting Logic ---
+            if self.is_rich_server:
+                # Validation loop for rich servers
+                while self.is_running:
+                    chosen_username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
+                    if not chosen_username:
+                        console.print("[bold red]Nickname cannot be empty.[/bold red]")
+                        continue
+                    is_taken = any(u.lower() == chosen_username.lower() for u in self.user_list.keys())
+                    if is_taken:
+                        console.print(f"[bold red]Nickname '{chosen_username}' is already in use.[/bold red]")
+                    else:
+                        self.username = chosen_username
+                        break
+            else:
+                # Simple prompt for basic servers (no validation)
+                self.username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
+
+            if not self.is_running or not self.username:
                 self.client_socket.close()
                 return
+            
+            # Set final username on the server
+            self._send_message(f"CMD_USER|{self.username}")
 
             # --- Main UI Loop ---
             with Live(self.layout, screen=True, redirect_stderr=False, refresh_per_second=20) as live:
@@ -478,6 +502,7 @@ class ChatClient:
             console.print("[bold blue]You have been disconnected. Goodbye![/bold blue]")
 
 
+
 if __name__ == "__main__":
     console.print(Panel(f"[bold cyan]Welcome to the Python Group Chat Client!\nVersion: {VERSION}[/bold cyan]", border_style="cyan"))
     try:
@@ -486,30 +511,58 @@ if __name__ == "__main__":
         manual_ip_option = "Enter IP manually..."
 
         if available_servers:
-            choices = available_servers + [manual_ip_option]
-            selection = Prompt.ask(
-                "[cyan]Select a discovered server or enter one manually[/cyan]",
-                choices=choices,
-                default=choices[0]
-            )
+            # Display discovered servers in a neat table
+            server_table = Table(title="Discovered Servers", show_header=True, header_style="bold magenta")
+            server_table.add_column("Option", style="dim", width=8)
+            server_table.add_column("IP Address")
+
+            for i, ip in enumerate(available_servers, 1):
+                server_table.add_row(str(i), ip)
+            
+            console.print(server_table)
+            
+            # Create choices for the prompt
+            prompt_choices = [str(i) for i in range(1, len(available_servers) + 1)] + [manual_ip_option]
+            selection = Prompt.ask("[cyan]Select a server by number or choose an option[/cyan]", choices=prompt_choices, default="1")
+
             if selection == manual_ip_option:
                 server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
             else:
-                server_ip = selection
+                # Select IP from list based on the 1-based index from the table
+                server_ip = available_servers[int(selection) - 1]
         else:
             server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
 
-        # --- Step 2: Discover or Enter Server Port ---
-        found_ports = discover_ports(server_ip)
+        # --- Step 2: Scan, Probe, and Select Port ---
+        probed_ports = scan_and_probe_ports(server_ip)
         manual_port_option = "Enter port manually..."
+        
+        if probed_ports:
+            port_table = Table(title=f"Scan Results for {server_ip}", show_header=True, header_style="bold magenta")
+            port_table.add_column("Port", justify="right", style="cyan", no_wrap=True)
+            port_table.add_column("Status")
 
-        if found_ports:
-            choices = [str(p) for p in found_ports] + [manual_port_option]
+            prompt_choices = []
+            # Separate ports by status to list joinable ones first
+            joinable_ports = {p: s for p, s in probed_ports.items() if s == "Joinable"}
+            open_ports = {p: s for p, s in probed_ports.items() if s == "Open"}
+
+            for port, status in joinable_ports.items():
+                port_table.add_row(str(port), f"[bold green]{status}[/bold green]")
+                prompt_choices.append(str(port))
+            for port, status in open_ports.items():
+                port_table.add_row(str(port), f"[yellow]{status}[/yellow]")
+                prompt_choices.append(str(port))
+            
+            console.print(port_table)
+            prompt_choices.append(manual_port_option)
+
             port_selection = Prompt.ask(
-                "[cyan]Select a discovered port or enter one manually[/cyan]",
-                choices=choices,
-                default=choices[0]
+                "[cyan]Select a port or enter one manually[/cyan]", 
+                choices=prompt_choices, 
+                default=prompt_choices[0] if prompt_choices else manual_port_option
             )
+            
             if port_selection == manual_port_option:
                 server_port_str = Prompt.ask("[cyan]Enter Server Port[/cyan]", default="8080")
             else:
