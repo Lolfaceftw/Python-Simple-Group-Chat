@@ -21,7 +21,7 @@ DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
 BROADCAST_INTERVAL_S = 5
 # ---------------------------------- #
 
-VERSION = '1.2'
+VERSION = '1.3'
 
 class ChatServer:
     """
@@ -105,7 +105,6 @@ class ChatServer:
                 client_socket.close()
                 # Notify remaining clients and log the event
                 notification = f"SRV|{username} has left the chat."
-                self.message_history.append(notification)
                 self._broadcast(notification)
                 self._broadcast_user_list()
 
@@ -135,6 +134,7 @@ class ChatServer:
             client_socket (socket.socket): The socket for the connected client.
             address (Tuple[str, int]): The address tuple of the client.
         """
+        client_announced = False # Flag to prevent duplicate join messages
         addr_str = f"{address[0]}:{address[1]}"
         console.log(f"[bold green]New connection from {addr_str}.[/bold green]")
         
@@ -154,8 +154,6 @@ class ChatServer:
                 return # Client disconnected while sending, exit thread
             
             join_notification = f"SRV|{username} has joined the chat."
-            with self.lock:
-                self.message_history.append(join_notification)
             self._broadcast(join_notification, client_socket)
             self._broadcast_user_list() # Send initial user list
 
@@ -178,23 +176,34 @@ class ChatServer:
 
                     if msg_type == "CMD_USER":
                         with self.lock:
-                            _, current_username = self.clients[client_socket]
-                        
-                        if current_username.lower() == payload.lower():
+                            old_username = self.clients[client_socket][1]
+
+                        if old_username.lower() == payload.lower():
                             self._send_direct_message(client_socket, "SRV|Did you even change your name?")
                         elif self._is_username_taken(payload, client_socket):
                             self._send_direct_message(client_socket, f"SRV|Nickname '{payload}' is already taken.")
                         else:
                             with self.lock:
-                                old_username = self.clients[client_socket][1]
                                 self.clients[client_socket] = (addr_str, payload)
-                                username = payload # Update local username variable for logging
-                            notification = f"SRV|{old_username} is now known as {username}."
+                                username = payload
+                            
+                            # If this is the first name being set, announce "join". Otherwise, announce "is now known as".
+                            if not client_announced:
+                                notification = f"SRV|{username} has joined the chat."
+                                client_announced = True
+                            else:
+                                notification = f"SRV|{old_username} is now known as {username}."
+                            
                             console.log(f"[yellow]{notification}[/yellow]")
                             self._broadcast(notification)
                             self._broadcast_user_list()
 
                     elif msg_type == "MSG":
+                        # Announce the user on their first message if they are a rich client who hasn't spoken yet.
+                        if not client_announced:
+                            self._broadcast(f"SRV|{username} has joined the chat.")
+                            client_announced = True
+
                         console.log(f"[cyan]{payload}[/cyan]")
                         full_message = f"MSG|{payload}"
                         with self.lock:
@@ -202,25 +211,28 @@ class ChatServer:
                         self._broadcast(full_message, client_socket)
                 else:
                     # Handle raw messages (from a basic client)
+                    # Announce the basic client on their first action (sending a message or command).
+                    if not client_announced:
+                        self._broadcast(f"SRV|{username} has joined the chat.")
+                        client_announced = True
+
                     if message.lower() == '/quit':
                         console.log(f"[yellow]Client {username} ({addr_str}) issued /quit command.[/yellow]")
-                        break  # Exit loop; the 'finally' block will handle cleanup
+                        break
 
                     elif message.lower().startswith('/nick '):
                         new_username = message.split(' ', 1)[1].strip()
                         if new_username:
                             with self.lock:
-                                _, current_username = self.clients[client_socket]
-
-                            if current_username.lower() == new_username.lower():
+                                old_username = self.clients[client_socket][1]
+                            if old_username.lower() == new_username.lower():
                                 self._send_direct_message(client_socket, "SRV|Did you even change your name?")
                             elif self._is_username_taken(new_username, client_socket):
                                 self._send_direct_message(client_socket, f"SRV|Nickname '{new_username}' is already taken.")
                             else:
                                 with self.lock:
-                                    old_username = self.clients[client_socket][1]
                                     self.clients[client_socket] = (addr_str, new_username)
-                                    username = new_username  # Update local username variable
+                                    username = new_username
                                 notification = f"SRV|{old_username} is now known as {username}."
                                 console.log(f"[yellow]{notification}[/yellow]")
                                 self._broadcast(notification)
@@ -229,12 +241,8 @@ class ChatServer:
                             self._send_direct_message(client_socket, "SRV|Invalid nickname provided.")
                     else:
                         # It's a regular message
-                        with self.lock:
-                            _, current_username = self.clients[client_socket]
-                        
-                        formatted_payload = f"{current_username}: {message}"
+                        formatted_payload = f"{username}: {message}"
                         console.log(f"[cyan]{formatted_payload}[/cyan]")
-                        
                         broadcast_message = f"MSG|{formatted_payload}"
                         with self.lock:
                             self.message_history.append(broadcast_message)

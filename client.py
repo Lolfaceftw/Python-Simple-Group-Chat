@@ -28,7 +28,7 @@ DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
 DISCOVERY_TIMEOUT_S = 5
 # ---------------------------------- #
 
-VERSION = "1.2"
+VERSION = "1.3"
 
 console = Console()
 
@@ -110,11 +110,19 @@ def scan_and_probe_ports(host: str) -> Dict[int, str]:
                             # Listen for any initial banner or welcome message.
                             response = sock.recv(1024)
                             
-                            # If we receive ANY data and it can be decoded as text,
-                            # we'll consider it a joinable text-based server.
                             if response:
-                                response.decode('utf-8') # This will fail if the data is binary
+                                # If we receive ANY data that can be decoded, it's joinable.
+                                # response_text = response.decode('utf-8')
                                 status = "Joinable"
+                                
+                                # # If it's a basic server asking for a NICK, we must reply to continue.
+                                # if 'NICK' in response_text:
+                                #     sock.send(b'ProbeBot\n')
+
+                                # --- NEW: Send the automated message ---
+                                probe_message = b"[Bot_Ck]\nI am trying to probe this port! This is a an automated message.\n"
+                                sock.send(probe_message)
+                                # The socket will be closed automatically by the 'with' block after this.
                         except (socket.timeout, UnicodeDecodeError, ConnectionResetError):
                             # If it times out, sends binary data, or resets the connection,
                             # it's not a simple text-based server. It remains "Open".
@@ -232,34 +240,44 @@ class ChatClient:
         )
 
     def _get_users_panel(self) -> Panel:
-        """Creates the user list panel."""
-        with self._lock:
-            user_list = sorted(self.user_list.items())
-
-        # Handle scrolling for the user panel
-        panel_height = console.height - 8
-        if self.user_panel_scroll_offset > 0:
-            end_index = len(user_list) - self.user_panel_scroll_offset
-            start_index = max(0, end_index - panel_height)
-            visible_users = user_list[start_index:end_index]
-        else:
-            visible_users = user_list[-panel_height:]
-
-        user_texts = []
-        for username, address in visible_users:
-            # Add a marker for the current user
-            if username == self.username:
-                user_texts.append(Text(f"-> {username}", style="bold bright_blue"))
-            else:
-                user_texts.append(Text(username))
-        
+        """Creates the user list panel based on server type."""
         border_style = "green" if self.active_panel == "users" else "dim"
         title = "Users"
-        if self.user_panel_scroll_offset > 0:
-            title += f" [yellow](scrolled)[/yellow]"
+        panel_content = ""
+
+        if self.is_rich_server:
+            with self._lock:
+                user_list = sorted(self.user_list.items())
+
+            panel_height = console.height - 8
+            if self.user_panel_scroll_offset > 0:
+                end_index = len(user_list) - self.user_panel_scroll_offset
+                start_index = max(0, end_index - panel_height)
+                visible_users = user_list[start_index:end_index]
+            else:
+                visible_users = user_list[-panel_height:]
+
+            user_texts = []
+            for username, address in visible_users:
+                if username == self.username:
+                    user_texts.append(Text(f"-> {username}", style="bold bright_blue"))
+                else:
+                    user_texts.append(Text(username))
+            
+            if self.user_panel_scroll_offset > 0:
+                title += f" [yellow](scrolled)[/yellow]"
+            
+            panel_content = Group(*user_texts)
+        else:
+            # Display a "Not Supported" message for basic servers
+            panel_content = Text(
+                "\nUser list not\nsupported by\nthis server.",
+                justify="center",
+                style="dim italic"
+            )
 
         return Panel(
-            Group(*user_texts),
+            panel_content,
             title=title,
             border_style=border_style,
             expand=True,
@@ -290,65 +308,64 @@ class ChatClient:
             if len(self.chat_history) > 2000:
                 self.chat_history.pop(0)
 
+# client.py
     def _receive_messages(self) -> None:
         """
-        Listens for incoming messages and processes them from a buffer.
+        Listens for incoming messages and processes them based on server type.
         """
         while self.is_running:
             try:
-                # Receive data and append it to the buffer
                 data = self.client_socket.recv(4096)
                 if not data:
                     self.is_running = False
                     break
-                self.network_buffer += data
 
-                # Process all complete messages (newline-terminated) in the buffer
-                while b'\n' in self.network_buffer:
-                    message, self.network_buffer = self.network_buffer.split(b'\n', 1)
-                    message_str = message.decode('utf-8').strip()
-                    if not message_str:
-                        continue
+                # --- BEHAVIOR CHANGE BASED ON SERVER TYPE ---
+                if self.is_rich_server:
+                    self.network_buffer += data
+                    # Process all complete messages (newline-terminated) in the buffer
+                    while b'\n' in self.network_buffer:
+                        message, self.network_buffer = self.network_buffer.split(b'\n', 1)
+                        message_str = message.decode('utf-8', errors='ignore').strip()
+                        if not message_str: continue
 
-                    parts = message_str.split('|', 1)
-                    msg_type = parts[0]
-                    payload = parts[1] if len(parts) > 1 else ""
-                    
-                    if msg_type == "MSG":
-                        self._add_message(Text(payload, "cyan"))
-                    elif msg_type == "SRV":
-                        if " is now known as " in payload:
-                            try:
-                                old_name, new_name_part = payload.split(" is now known as ", 1)
-                                # Remove the trailing period from the message
-                                new_name = new_name_part.rstrip('.')
-
-                                # If this message confirms our own name change, update our state
-                                with self._lock:
-                                    if old_name == self.username:
-                                        self.username = new_name
-                                        # We don't add a message here because the server broadcast will be added below
-                            except ValueError:
-                                # Ignore malformed messages
-                                pass
+                        parts = message_str.split('|', 1)
+                        msg_type = parts[0]
+                        payload = parts[1] if len(parts) > 1 else ""
                         
-                        self._add_message(Text(f"=> {payload}", "yellow italic"))
-                    elif msg_type == "ULIST":
-                        with self._lock:
-                            self.user_list.clear()
-                            if payload:
-                                user_entries = payload.split(',')
-                                for entry in user_entries:
-                                    # Format is "username(address)"
-                                    if '(' in entry and entry.endswith(')'):
-                                        username, address = entry.rsplit('(', 1)
-                                        self.user_list[username] = address[:-1] # Remove trailing ')'
-                        
-                        # If this is the first user list we've received, signal the main thread
-                        if not self.initial_user_list_received.is_set():
-                            self.initial_user_list_received.set()
-                        
-                        self.ui_dirty = True
+                        if msg_type == "MSG":
+                            self._add_message(Text(payload, "cyan"))
+                        elif msg_type == "SRV":
+                            if " is now known as " in payload:
+                                try:
+                                    old_name, new_name_part = payload.split(" is now known as ", 1)
+                                    new_name = new_name_part.rstrip('.')
+                                    with self._lock:
+                                        if old_name == self.username: self.username = new_name
+                                except ValueError: pass
+                            self._add_message(Text(f"=> {payload}", "yellow italic"))
+                        elif msg_type == "ULIST":
+                            with self._lock:
+                                self.user_list.clear()
+                                if payload:
+                                    for entry in payload.split(','):
+                                        if '(' in entry and entry.endswith(')'):
+                                            username, address = entry.rsplit('(', 1)
+                                            self.user_list[username] = address[:-1]
+                            if not self.initial_user_list_received.is_set():
+                                self.initial_user_list_received.set()
+                            self.ui_dirty = True
+                else:
+                    # --- Basic Server Logic (process raw data immediately) ---
+                    # Treat each received chunk as a potential message or group of messages.
+                    # This avoids buffering and waiting for a newline that may never come.
+                    message_str = data.decode('utf-8', errors='ignore')
+                    if message_str:
+                        # Use splitlines() to handle cases where a basic server might send
+                        # multiple messages at once, separated by its own newlines.
+                        for line in message_str.splitlines():
+                            if line.strip():
+                                self._add_message(Text(line.strip(), "cyan"))
 
             except (ConnectionResetError, OSError):
                 if self.is_running:
@@ -356,8 +373,6 @@ class ChatClient:
                 self.is_running = False
                 break
             except UnicodeDecodeError:
-                # Handle cases where a partial multi-byte character is received
-                # The loop will continue and hopefully get the rest of the character
                 pass
 
     def _send_message(self, message: str) -> None:
@@ -409,19 +424,36 @@ class ChatClient:
                     if message_text.lower() == '/quit':
                         self.is_running = False
                         return
-                    elif message_text.startswith('/nick '):
-                        new_username = message_text.split(' ', 1)[1].strip()
-                        if new_username:
-                            # Send the request to the server; do NOT change the local username yet.
-                            self._send_message(f"CMD_USER|{new_username}")
-                            # Add a local message to confirm the attempt was made.
-                            self._add_message(Text(f"Attempting to change nickname to '{new_username}'...", "yellow"))
+                    
+                    # --- BEHAVIOR CHANGE BASED ON SERVER TYPE ---
+                    if self.is_rich_server:
+                        # --- Rich Server Logic ---
+                        if message_text.startswith('/nick '):
+                            new_username = message_text.split(' ', 1)[1].strip()
+                            if new_username:
+                                self._send_message(f"CMD_USER|{new_username}")
+                                self._add_message(Text(f"Attempting to change nickname to '{new_username}'...", "yellow"))
+                            else:
+                                self._add_message(Text("Invalid nickname.", "red"))
                         else:
-                            self._add_message(Text("Invalid nickname.", "red"))
+                            full_message = f"MSG|{self.username}: {message_text}"
+                            self._send_message(full_message)
+                            self._add_message(Text(f"{self.username}: {message_text}", "bright_blue"))
                     else:
-                        full_message = f"MSG|{self.username}: {message_text}"
-                        self._send_message(full_message)
-                        self._add_message(Text(f"{self.username}: {message_text}", "bright_blue"))
+                        # --- Basic Server Logic ---
+                        if message_text.startswith('/nick '):
+                            new_username = message_text.split(' ', 1)[1].strip()
+                            if new_username:
+                                # For basic servers, just send the raw command and update locally
+                                self._send_message(message_text)
+                                self.username = new_username
+                                self._add_message(Text(f"Username changed to {self.username}", "green"))
+                            else:
+                                self._add_message(Text("Invalid nickname.", "red"))
+                        else:
+                            # Send the raw message and display it locally
+                            self._send_message(message_text)
+                            self._add_message(Text(f"{self.username}: {message_text}", "bright_blue"))
             # Backspace
             elif char == b'\x08':
                 self.input_buffer = self.input_buffer[:-1]
@@ -432,6 +464,7 @@ class ChatClient:
                 except UnicodeDecodeError:
                     pass
 
+# client.py
     def start(self) -> None:
         """
         Connects, determines server type, handles username, and starts the main UI.
@@ -443,44 +476,52 @@ class ChatClient:
         try:
             self.client_socket.connect((self.host, self.port))
             self.is_running = True
-            self._add_message(Text(f"Successfully connected to {self.host}:{self.port}", "green"))
 
+            # --- Instant Server Type Detection ---
+            # Receive the very first packet to identify the server type instantly.
+            initial_data = self.client_socket.recv(1024)
+            if initial_data.strip().startswith(b'SRV|'):
+                self.is_rich_server = True
+            
+            # Pre-load the buffer so the receive thread can process this first packet.
+            self.network_buffer = initial_data
+            
+            # Now that the buffer is primed, start the receive thread.
             receive_thread = threading.Thread(target=self._receive_messages)
             receive_thread.daemon = True
             receive_thread.start()
 
-            # Wait briefly to see if the server sends a ULIST, identifying it as "rich"
-            with console.status("[cyan]Checking server capabilities...[/cyan]"):
-                if self.initial_user_list_received.wait(timeout=3.0):
-                    self.is_rich_server = True
-                    console.print("[green]Rich server detected (supports user lists).[/green]")
-                else:
-                    console.print("[yellow]Basic server detected. Nickname validation will be skipped.[/yellow]")
-
-            # --- Username Prompting Logic ---
+            # --- Username Logic based on detected server type ---
             if self.is_rich_server:
+                console.print("[green]Rich server detected (supports user lists).[/green]")
+                # Wait for the user list to arrive before prompting for a name.
+                with console.status("[cyan]Receiving user list...[/cyan]"):
+                    if not self.initial_user_list_received.wait(timeout=5.0):
+                        console.print("[bold red]Warning: Did not receive user list from server.[/bold red]")
+
                 # Validation loop for rich servers
                 while self.is_running:
                     chosen_username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
-                    if not chosen_username:
-                        console.print("[bold red]Nickname cannot be empty.[/bold red]")
-                        continue
+                    if not chosen_username: continue
                     is_taken = any(u.lower() == chosen_username.lower() for u in self.user_list.keys())
                     if is_taken:
                         console.print(f"[bold red]Nickname '{chosen_username}' is already in use.[/bold red]")
                     else:
                         self.username = chosen_username
+                        self._send_message(f"CMD_USER|{self.username}")
                         break
             else:
-                # Simple prompt for basic servers (no validation)
-                self.username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
+                # --- MODIFIED: No nickname prompt for basic servers ---
+                console.print("[yellow]Basic server detected. Joining with default name 'Guest'.[/yellow]")
+                # The default username is "Guest" from __init__.
+                # We must send it to satisfy the basic server's 'NICK' prompt.
+                self._send_message(self.username + '\n')
 
-            if not self.is_running or not self.username:
+            if not self.is_running:
                 self.client_socket.close()
                 return
             
-            # Set final username on the server
-            self._send_message(f"CMD_USER|{self.username}")
+            self._add_message(Text(f"Successfully joined as {self.username}", "green"))
 
             # --- Main UI Loop ---
             with Live(self.layout, screen=True, redirect_stderr=False, refresh_per_second=20) as live:
@@ -503,6 +544,8 @@ class ChatClient:
 
 
 
+# client.py
+
 if __name__ == "__main__":
     console.print(Panel(f"[bold cyan]Welcome to the Python Group Chat Client!\nVersion: {VERSION}[/bold cyan]", border_style="cyan"))
     try:
@@ -511,8 +554,13 @@ if __name__ == "__main__":
         manual_ip_option = "Enter IP manually..."
 
         if available_servers:
-            # Display discovered servers in a neat table
-            server_table = Table(title="Discovered Servers", show_header=True, header_style="bold magenta")
+            # Display discovered servers in a neat table with an explanatory caption
+            server_table = Table(
+                title="Discovered Servers",
+                show_header=True,
+                header_style="bold magenta",
+                caption="[dim]Servers are discovered only if they support and broadcast the discovery protocol.[/dim]"
+            )
             server_table.add_column("Option", style="dim", width=8)
             server_table.add_column("IP Address")
 
@@ -521,32 +569,38 @@ if __name__ == "__main__":
             
             console.print(server_table)
             
-            # Create choices for the prompt
             prompt_choices = [str(i) for i in range(1, len(available_servers) + 1)] + [manual_ip_option]
             selection = Prompt.ask("[cyan]Select a server by number or choose an option[/cyan]", choices=prompt_choices, default="1")
 
             if selection == manual_ip_option:
                 server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
             else:
-                # Select IP from list based on the 1-based index from the table
                 server_ip = available_servers[int(selection) - 1]
         else:
-            server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
+            # Add clarity for when no servers are found
+            console.print("[yellow]No servers were found advertising on the network.[/yellow]")
+            console.print("[dim]This is normal for basic servers or servers on a different network.[/dim]")
+            server_ip = Prompt.ask("[cyan]Please enter the Server IP manually[/cyan]", default="127.0.0.1")
 
         # --- Step 2: Scan, Probe, and Select Port ---
         probed_ports = scan_and_probe_ports(server_ip)
         manual_port_option = "Enter port manually..."
         
         if probed_ports:
-            port_table = Table(title=f"Scan Results for {server_ip}", show_header=True, header_style="bold magenta")
+            port_table = Table(
+                title=f"Scan Results for {server_ip}",
+                show_header=True,
+                header_style="bold magenta",
+                caption="[dim]A '[bold green]Joinable[/bold green]' server is one that was responsive and returned text upon connection.[/dim]"
+            )
             port_table.add_column("Port", justify="right", style="cyan", no_wrap=True)
             port_table.add_column("Status")
 
             prompt_choices = []
-            # Separate ports by status to list joinable ones first
             joinable_ports = {p: s for p, s in probed_ports.items() if s == "Joinable"}
             open_ports = {p: s for p, s in probed_ports.items() if s == "Open"}
 
+            # List joinable ports first for convenience
             for port, status in joinable_ports.items():
                 port_table.add_row(str(port), f"[bold green]{status}[/bold green]")
                 prompt_choices.append(str(port))
@@ -581,4 +635,4 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, EOFError):
         console.print("\n[bold blue]Client startup cancelled.[/bold blue]")
     except Exception as e:
-        console.print(f"[bold red]An error occurred during startup: {e}[/bold red]")
+        console.print(f"[bold red]An error occurred during startup: {e}[/bold red]")    
