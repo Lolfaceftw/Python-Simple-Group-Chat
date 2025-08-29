@@ -51,13 +51,13 @@ class ChatServer:
 
     def _broadcast(self, message: str, sender_socket: socket.socket = None) -> None:
         """
-        Sends a message to all connected clients except the sender.
-
-        Args:
-            message (str): The message to be broadcasted.
-            sender_socket (socket.socket, optional): The socket of the client who
-                                                     sent the message. If None,
-                                                     sends to all clients.
+        Broadcast a message to all connected clients, optionally excluding the sender.
+        
+        If provided, sender_socket is excluded from delivery so the originator does not receive their own message.
+        This operation is safe to call from multiple threads.
+        Parameters:
+            message (str): Message to send (already formatted).
+            sender_socket (socket.socket, optional): Socket to exclude from the broadcast.
         """
         with self.lock:
             for client_socket in list(self.clients):
@@ -85,12 +85,14 @@ class ChatServer:
 
     def _remove_client(self, client_socket: socket.socket) -> None:
         """
-        Removes a client from the active connections.
-
-        This method is called when a client disconnects or an error occurs.
-
-        Args:
-            client_socket (socket.socket): The socket of the client to remove.
+        Remove a connected client, close its socket, and notify remaining users.
+        
+        Acquires the server lock, and if the given client socket is registered removes its mapping,
+        closes the socket, appends a server "left" notification to the message history, broadcasts
+        that notification to all remaining clients, and broadcasts the updated user list.
+        
+        Parameters:
+            client_socket (socket.socket): The connected client socket to remove; expected to be a key in self.clients.
         """
         with self.lock:
             if client_socket in self.clients:
@@ -106,14 +108,12 @@ class ChatServer:
 
     def _is_username_taken(self, username: str, requesting_socket: socket.socket) -> bool:
         """
-        Checks if a username is already in use by another client (case-insensitive).
-
-        Args:
-            username (str): The username to check.
-            requesting_socket (socket.socket): The socket of the client requesting the name change.
-
+        Return True if `username` is already in use by another connected client (case-insensitive).
+        
+        Excludes the provided `requesting_socket` from the check so a client can compare against others when attempting a rename.
+        
         Returns:
-            bool: True if the username is taken, False otherwise.
+            bool: True if the username is taken by a different client, False otherwise.
         """
         with self.lock:
             for client_socket, (_, existing_username) in self.clients.items():
@@ -124,11 +124,32 @@ class ChatServer:
 
     def _handle_client(self, client_socket: socket.socket, address: Tuple[str, int]) -> None:
         """
-        Handles communication with a single client in a dedicated thread.
-
-        Args:
-            client_socket (socket.socket): The socket for the connected client.
-            address (Tuple[str, int]): The address tuple of the client.
+        Handle communication for a single connected client in its own thread.
+        
+        Accepts messages from the client (both prefixed messages like "CMD_USER|name" and "MSG|text"
+        and plain-text commands), updates server state, and broadcasts events to other clients.
+        
+        Behavior:
+        - On connect: assigns a default username "User_<ip>:<port>", sends a welcome message and recent
+          message history, appends a join notification to history, broadcasts the join, and broadcasts
+          the current user list.
+        - Prefixed messages:
+          - "CMD_USER|<name>": attempt to rename the client. Rejects if unchanged or name is already
+            taken (case-insensitive). On success updates the server's client entry, broadcasts a rename
+            notification, and refreshes the user list.
+          - "MSG|<text>": records "MSG|<text>" to message history and broadcasts it to other clients.
+        - Plain-text messages:
+          - "/quit": disconnects the client (causes cleanup).
+          - "/nick <name>": same validation and rename semantics as CMD_USER.
+          - Any other text: treated as chat content; formatted as "<username>: <text>", recorded to
+            history as "MSG|<username>: <text>" and broadcast to other clients.
+        - Thread-safety: mutates shared state (clients mapping and message_history) while holding
+          self.lock.
+        - On socket closure or network error the client is removed and a left-chat notification is sent.
+        
+        Parameters:
+            client_socket (socket.socket): The connected client's socket.
+            address (Tuple[str, int]): The client's (ip, port) address.
         """
         addr_str = f"{address[0]}:{address[1]}"
         console.log(f"[bold green]New connection from {addr_str}.[/bold green]")
