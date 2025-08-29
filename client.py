@@ -27,56 +27,55 @@ DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
 DISCOVERY_TIMEOUT_S = 5
 # ---------------------------------- #
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 console = Console()
 
 def discover_servers() -> List[str]:
     """Listens for server discovery broadcasts on the network."""
     discovered_servers = set()
-    console.print("[cyan]Scanning for servers on the local network...[/cyan]")
+    with console.status("[cyan]Scanning for servers on the local network...[/cyan]", spinner="dots"):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            # Set socket options to allow multiple clients to listen on the same port.
+            # SO_REUSEADDR allows binding to a port that is in a TIME_WAIT state.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        # Set socket options to allow multiple clients to listen on the same port.
-        # SO_REUSEADDR allows binding to a port that is in a TIME_WAIT state.
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # SO_REUSEPORT allows multiple sockets to be bound to the exact same
+            # address and port. This is key for allowing multiple clients on the
+            # same machine to discover the server simultaneously.
+            # This option is not available on Windows.
+            if hasattr(socket, "SO_REUSEPORT"):
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                except OSError as e:
+                    # This might fail on systems that define the constant but don't fully support it.
+                    console.log(f"[yellow]Could not set SO_REUSEPORT: {e}[/yellow]")
 
-        # SO_REUSEPORT allows multiple sockets to be bound to the exact same
-        # address and port. This is key for allowing multiple clients on the
-        # same machine to discover the server simultaneously.
-        # This option is not available on Windows.
-        if hasattr(socket, "SO_REUSEPORT"):
+
+            # Bind to the discovery port to receive broadcasts
             try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+                sock.bind(("", DISCOVERY_PORT))
             except OSError as e:
-                # This might fail on systems that define the constant but don't fully support it.
-                console.log(f"[yellow]Could not set SO_REUSEPORT: {e}[/yellow]")
+                console.print(f"[bold red]Error: Could not bind to port {DISCOVERY_PORT} for discovery. {e}[/bold red]")
+                console.print("[yellow]Hint: Is another client already running or is the port in use?[/yellow]")
+                return []
+            
+            # Listen for a few seconds
+            sock.settimeout(DISCOVERY_TIMEOUT_S)
 
-
-        # Bind to the discovery port to receive broadcasts
-        try:
-            sock.bind(("", DISCOVERY_PORT))
-        except OSError as e:
-            console.print(f"[bold red]Error: Could not bind to port {DISCOVERY_PORT} for discovery. {e}[/bold red]")
-            console.print("[yellow]Hint: Is another client already running or is the port in use?[/yellow]")
-            return []
+            end_time = time.time() + DISCOVERY_TIMEOUT_S
+            while time.time() < end_time:
+                try:
+                    data, addr = sock.recvfrom(1024)
+                    if data == DISCOVERY_MESSAGE:
+                        discovered_servers.add(addr[0])
+                except socket.timeout:
+                    break # No more messages
+                except Exception as e:
+                    console.log(f"[red]Error during discovery: {e}[/red]")
+                    break
         
-        # Listen for a few seconds
-        sock.settimeout(DISCOVERY_TIMEOUT_S)
-
-        end_time = time.time() + DISCOVERY_TIMEOUT_S
-        while time.time() < end_time:
-            try:
-                data, addr = sock.recvfrom(1024)
-                if data == DISCOVERY_MESSAGE:
-                    discovered_servers.add(addr[0])
-            except socket.timeout:
-                break # No more messages
-            except Exception as e:
-                console.log(f"[red]Error during discovery: {e}[/red]")
-                break
-    
-    server_list = sorted(list(discovered_servers))
+        server_list = sorted(list(discovered_servers))
     if server_list:
         console.print(f"[green]Found {len(server_list)} server(s): {', '.join(server_list)}[/green]")
     else:
@@ -89,18 +88,19 @@ class ChatClient:
     A TCP chat client with a rich, interactive command-line interface.
     """
 
-    def __init__(self, host: str, port: int, username: str) -> None:
+    def __init__(self, host: str, port: int) -> None:
         """
         Initializes the ChatClient.
         """
         self.host: str = host
         self.port: int = port
-        self.username: str = username
+        self.username: str = "Connecting..." # A temporary name
         self.client_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.is_running: bool = False
         self.chat_history: List[Text] = []
         self._lock: threading.Lock = threading.Lock()
-        
+        self.initial_user_list_received = threading.Event()
+
         # UI State
         self.input_buffer: str = ""
         self.scroll_offset: int = 0
@@ -255,18 +255,37 @@ class ChatClient:
                     if msg_type == "MSG":
                         self._add_message(Text(payload, "cyan"))
                     elif msg_type == "SRV":
+                        if " is now known as " in payload:
+                            try:
+                                old_name, new_name_part = payload.split(" is now known as ", 1)
+                                # Remove the trailing period from the message
+                                new_name = new_name_part.rstrip('.')
+
+                                # If this message confirms our own name change, update our state
+                                with self._lock:
+                                    if old_name == self.username:
+                                        self.username = new_name
+                                        # We don't add a message here because the server broadcast will be added below
+                            except ValueError:
+                                # Ignore malformed messages
+                                pass
+                        
                         self._add_message(Text(f"=> {payload}", "yellow italic"))
                     elif msg_type == "ULIST":
                         with self._lock:
                             self.user_list.clear()
-                            if not payload:
-                                continue
-                            user_entries = payload.split(',')
-                            for entry in user_entries:
-                                # Format is "username(address)"
-                                if '(' in entry and entry.endswith(')'):
-                                    username, address = entry.rsplit('(', 1)
-                                    self.user_list[username] = address[:-1] # Remove trailing ')'
+                            if payload:
+                                user_entries = payload.split(',')
+                                for entry in user_entries:
+                                    # Format is "username(address)"
+                                    if '(' in entry and entry.endswith(')'):
+                                        username, address = entry.rsplit('(', 1)
+                                        self.user_list[username] = address[:-1] # Remove trailing ')'
+                        
+                        # If this is the first user list we've received, signal the main thread
+                        if not self.initial_user_list_received.is_set():
+                            self.initial_user_list_received.set()
+                        
                         self.ui_dirty = True
 
             except (ConnectionResetError, OSError):
@@ -282,7 +301,7 @@ class ChatClient:
     def _send_message(self, message: str) -> None:
         """Sends a formatted message to the server."""
         try:
-            self.client_socket.send(message.encode('utf-8'))
+            self.client_socket.send(( message + "\n").encode('utf-8'))
         except BrokenPipeError:
             pass
 
@@ -331,10 +350,10 @@ class ChatClient:
                     elif message_text.startswith('/nick '):
                         new_username = message_text.split(' ', 1)[1].strip()
                         if new_username:
-                            # Optimistically update the local username
-                            self.username = new_username
-                            self._send_message(f"CMD_USER|{self.username}")
-                            self._add_message(Text(f"Username changed to {self.username}", "green"))
+                            # Send the request to the server; do NOT change the local username yet.
+                            self._send_message(f"CMD_USER|{new_username}")
+                            # Add a local message to confirm the attempt was made.
+                            self._add_message(Text(f"Attempting to change nickname to '{new_username}'...", "yellow"))
                         else:
                             self._add_message(Text("Invalid nickname.", "red"))
                     else:
@@ -353,37 +372,62 @@ class ChatClient:
 
     def start(self) -> None:
         """
-        Connects to the server and starts the main UI and I/O loops.
+        Connects, validates username, and then starts the main UI and I/O loops.
         """
         if sys.platform != "win32":
             console.print("[bold red]This UI is currently only supported on Windows.[/bold red]")
             console.print("A future version will add support for macOS and Linux.")
             return
-            
+
         try:
             self.client_socket.connect((self.host, self.port))
             self.is_running = True
-            
-            self._send_message(f"CMD_USER|{self.username}")
-
             self._add_message(Text(f"Successfully connected to {self.host}:{self.port}", "green"))
 
-            # Start the thread for receiving messages
             receive_thread = threading.Thread(target=self._receive_messages)
             receive_thread.daemon = True
             receive_thread.start()
 
+            # Wait for the server to send the initial user list, with a timeout
+            with console.status("[cyan]Finalizing connection...[/cyan]"):
+                if not self.initial_user_list_received.wait(timeout=10.0):
+                    console.print("[bold red]Error: Did not receive user list from server.[/bold red]")
+                    self.is_running = False
+                    self.client_socket.close()
+                    return
+
+            # --- Username Prompting and Validation Loop ---
+            while self.is_running:
+                chosen_username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
+                if not chosen_username:
+                    console.print("[bold red]Nickname cannot be empty.[/bold red]")
+                    continue
+
+                is_taken = False
+                with self._lock:
+                    for existing_user in self.user_list.keys():
+                        if existing_user.lower() == chosen_username.lower():
+                            is_taken = True
+                            break
+                
+                if is_taken:
+                    console.print(f"[bold red]Nickname '{chosen_username}' is already in use. Please choose another.[/bold red]")
+                else:
+                    self.username = chosen_username
+                    self._send_message(f"CMD_USER|{self.username}")
+                    break # Success, exit the prompt loop
+            
+            if not self.is_running: # Handle potential shutdown during prompt
+                self.client_socket.close()
+                return
+
+            # --- Main UI Loop ---
             with Live(self.layout, screen=True, redirect_stderr=False, refresh_per_second=20) as live:
                 while self.is_running:
-                    # Handle keyboard input
                     self._handle_input_windows()
-                    
-                    # Only update the layout if something has changed
                     if self.ui_dirty:
                         self._update_layout()
-                        self.ui_dirty = False # Reset the flag
-                    
-                    # Small sleep to prevent busy-waiting and save CPU
+                        self.ui_dirty = False
                     time.sleep(0.01)
 
         except ConnectionRefusedError:
@@ -402,23 +446,31 @@ if __name__ == "__main__":
     try:
         # Discover servers on the network first
         available_servers = discover_servers()
+        manual_entry_option = "Enter IP manually..."
 
-        # Use a dropdown if servers are found, otherwise a normal prompt
         if available_servers:
-            server_ip = Prompt.ask(
-                "[cyan]Enter Server IP[/cyan]",
-                choices=available_servers,
-                default=available_servers[0]
+            # Add the manual entry option to the list of choices
+            choices = available_servers + [manual_entry_option]
+            
+            selection = Prompt.ask(
+                "[cyan]Select a discovered server or enter one manually[/cyan]",
+                choices=choices,
+                default=choices[0]
             )
+
+            if selection == manual_entry_option:
+                server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
+            else:
+                server_ip = selection
         else:
+            # If no servers are found, just ask for the IP directly
             server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
 
         server_port_str = Prompt.ask("[cyan]Enter Server Port[/cyan]", default="8080")
-        username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
-
         server_port = int(server_port_str)
 
-        client = ChatClient(server_ip, server_port, username)
+        # The username will now be prompted for after connecting.
+        client = ChatClient(server_ip, server_port)
         client.start()
 
     except ValueError:
