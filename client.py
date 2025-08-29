@@ -32,7 +32,14 @@ VERSION = "1.2"
 console = Console()
 
 def discover_servers() -> List[str]:
-    """Listens for server discovery broadcasts on the network."""
+    """
+    Discover chat servers by listening for UDP broadcast advertisements on DISCOVERY_PORT.
+    
+    Listens for DISCOVERY_TIMEOUT_S seconds for UDP packets that exactly match DISCOVERY_MESSAGE.
+    Returns a sorted list of unique IPv4 addresses that advertised themselves. If the function
+    cannot bind to the discovery port (e.g., port in use), it returns an empty list. Progress
+    and results are printed to the console.
+    """
     discovered_servers = set()
     with console.status("[cyan]Scanning for servers on the local network...[/cyan]", spinner="dots"):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -90,7 +97,23 @@ class ChatClient:
 
     def __init__(self, host: str, port: int) -> None:
         """
-        Initializes the ChatClient.
+        Create a ChatClient configured to connect to a TCP chat server.
+        
+        Parameters:
+            host (str): Server hostname or IP address to connect to.
+            port (int): TCP port on the server to connect to.
+        
+        Description:
+            Initializes client state and UI placeholders but does not open a network connection.
+            - Sets a temporary username ("Connecting...") until the server and user-list handshake completes.
+            - Allocates a non-connected TCP socket for later use.
+            - Prepares synchronization primitives (lock and event) used by background receiver logic.
+            - Initializes in-memory chat history, per-panel UI state (input buffer, scroll offsets, active panel),
+              and an empty user list.
+            - Builds the initial Rich layout for the terminal UI.
+        
+        Notes:
+            The socket created is not connected; call start() to establish the connection and begin network activity.
         """
         self.host: str = host
         self.port: int = port
@@ -230,7 +253,29 @@ class ChatClient:
 
     def _receive_messages(self) -> None:
         """
-        Listens for incoming messages and processes them from a buffer.
+        Listen for and process newline-delimited messages from the server.
+        
+        Reads raw bytes from the connected socket into self.network_buffer, extracts
+        complete newline-terminated messages, and handles known message types:
+        
+        - "MSG|<payload>": appends a cyan chat message.
+        - "SRV|<payload>": appends a yellow italic server notice. If the payload
+          contains "old is now known as new", updates self.username when old matches
+          the current username (trailing period on the new name is ignored).
+        - "ULIST|<payload>": replaces self.user_list with entries parsed from a
+          comma-separated list of "username(address)". If this is the first ULIST
+          received, sets self.initial_user_list_received. Marks the UI as dirty.
+        
+        Side effects:
+        - Calls self._add_message to record messages.
+        - Mutates self.network_buffer, self.user_list, self.username, self.ui_dirty,
+          and self.initial_user_list_received.
+        - Sets self.is_running = False and exits the loop when the connection closes.
+        
+        Errors:
+        - On ConnectionResetError or OSError, adds a "Connection to server lost."
+          message and stops receiving.
+        - Ignores UnicodeDecodeError to tolerate partial multibyte sequences.
         """
         while self.is_running:
             try:
@@ -299,14 +344,41 @@ class ChatClient:
                 pass
 
     def _send_message(self, message: str) -> None:
-        """Sends a formatted message to the server."""
+        """
+        Send a text message to the connected server, appending a newline and encoding as UTF-8.
+        
+        Parameters:
+            message (str): Text to send; a trailing newline is added for message framing.
+        
+        Notes:
+            BrokenPipeError (connection closed) is silently ignored.
+        """
         try:
             self.client_socket.send(( message + "\n").encode('utf-8'))
         except BrokenPipeError:
             pass
 
     def _handle_input_windows(self) -> None:
-        """Handles non-blocking keyboard input on Windows."""
+        """
+        Handle non-blocking keyboard input on Windows and update client UI/state.
+        
+        Listens for a keypress (via msvcrt) and translates input into client actions:
+        - TAB: toggle active panel between "chat" and "users".
+        - Arrow keys: scroll the active panel (up/down).
+        - Enter: submit the current input_buffer:
+          - "/quit" (case-insensitive) stops the client.
+          - "/nick <name>" sends a nickname change request to the server as "CMD_USER|<name>" but does not locally change self.username; a local informational message is added.
+          - Any other text is sent as "MSG|{username}: {text}" and is echoed into chat history.
+        - Backspace: remove the last character from input_buffer.
+        - Regular printable characters: append to input_buffer (UTF-8 decode errors are ignored).
+        
+        Side effects:
+        - Marks the UI dirty (self.ui_dirty = True) when a key is handled.
+        - Updates scroll offsets, input_buffer, chat history (via _add_message), sends framed messages to the server (via _send_message), and may set self.is_running = False for /quit.
+        
+        Returns:
+            None
+        """
         if msvcrt.kbhit():
             self.ui_dirty = True
             char = msvcrt.getch()
@@ -372,7 +444,20 @@ class ChatClient:
 
     def start(self) -> None:
         """
-        Connects, validates username, and then starts the main UI and I/O loops.
+        Establish the TCP connection, negotiate a unique username, and run the main UI and I/O loops.
+        
+        Connects the client socket to the configured host/port, spawns a background receiver thread, and waits (up to 10s) for the server to send an initial user list. If the initial user list arrives, repeatedly prompts the local user for a username (rejecting empty names and names already present in the received user list, case-insensitively), sends the chosen name to the server, then enters the live Rich-based UI loop which processes keyboard input and renders the chat until shutdown.
+        
+        Side effects:
+        - Opens a TCP connection and may start a background thread.
+        - Blocks for user interaction (username prompt and the interactive UI).
+        - Sends a username registration message to the server ("CMD_USER|<username>").
+        - On shutdown or connection failure, ensures the socket is closed and stops the UI.
+        
+        Behavior notes:
+        - Immediately returns if run on non-Windows platforms.
+        - If the initial user list is not received within 10 seconds, the connection is aborted and the method returns.
+        - Handles ConnectionRefusedError and socket.gaierror internally and prints user-facing error messages; always cleans up the socket and marks the client as not running on exit.
         """
         if sys.platform != "win32":
             console.print("[bold red]This UI is currently only supported on Windows.[/bold red]")
