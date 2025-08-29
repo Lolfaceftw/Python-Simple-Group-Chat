@@ -77,11 +77,16 @@ class ChatServer:
             self._broadcast(message)
 
     def _send_direct_message(self, client_socket: socket.socket, message: str) -> None:
-        """Sends a newline-terminated message directly to a single client."""
+        """
+        Sends a newline-terminated message directly to a single client.
+        Returns True on success, False on failure.
+        """
         try:
             client_socket.send((message + '\n').encode('utf-8'))
+            return True
         except socket.error:
             self._remove_client(client_socket)
+            return False
 
     def _remove_client(self, client_socket: socket.socket) -> None:
         """
@@ -133,19 +138,26 @@ class ChatServer:
         addr_str = f"{address[0]}:{address[1]}"
         console.log(f"[bold green]New connection from {addr_str}.[/bold green]")
         
+        history_copy = []
         with self.lock:
             username = f"User_{addr_str}"
             self.clients[client_socket] = (addr_str, username)
+            # Create a thread-safe copy of the history while locked
+            history_copy = list(self.message_history)
 
-            self._send_direct_message(client_socket, "SRV|Welcome! Here are the recent messages:")
-            for msg in self.message_history:
-                self._send_direct_message(client_socket, msg)
-        
-        join_notification = f"SRV|{username} has joined the chat."
-        with self.lock:
-            self.message_history.append(join_notification)
-        self._broadcast(join_notification, client_socket)
-        self._broadcast_user_list() # Send initial user list
+        # Now, iterate over the safe copy outside of the lock
+        if not self._send_direct_message(client_socket, "SRV|Welcome! Here are the recent messages:"):
+            return # Client disconnected while sending, exit thread
+
+        for msg in history_copy:
+            if not self._send_direct_message(client_socket, msg):
+                return # Client disconnected while sending, exit thread
+            
+            join_notification = f"SRV|{username} has joined the chat."
+            with self.lock:
+                self.message_history.append(join_notification)
+            self._broadcast(join_notification, client_socket)
+            self._broadcast_user_list() # Send initial user list
 
         try:
             while True:
@@ -228,8 +240,10 @@ class ChatServer:
                             self.message_history.append(broadcast_message)
                         self._broadcast(broadcast_message, client_socket)
 
-        except (ConnectionResetError, BrokenPipeError):
-            console.log(f"[bold red]Connection lost with {username} ({addr_str}).[/bold red]")
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+            # This will now gracefully handle port scanners and clients that crash or disconnect abruptly.
+            # We can use a less alarming, dimmed message for this type of closure.
+            console.log(f"[dim]Connection with {username} ({addr_str}) closed abruptly.[/dim]")
         finally:
             self._remove_client(client_socket)
 

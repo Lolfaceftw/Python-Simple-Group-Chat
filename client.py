@@ -83,6 +83,43 @@ def discover_servers() -> List[str]:
 
     return server_list
 
+def discover_ports(host: str) -> List[int]:
+    """Scans a target IP for open ports in a common range."""
+    open_ports = []
+    # Scan a common range of user ports to keep it fast
+    scan_range = range(6000, 65535) 
+    
+    with console.status(f"[cyan]Scanning {host} for open ports...[/cyan]", spinner="dots"):
+        # Use a thread pool to speed up scanning
+        threads = []
+        lock = threading.Lock()
+
+        def scan_port(port):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(0.5)  # Set a short timeout
+                    if sock.connect_ex((host, port)) == 0:
+                        with lock:
+                            open_ports.append(port)
+            except socket.error:
+                pass # Ignore connection errors
+
+        for port in scan_range:
+            thread = threading.Thread(target=scan_port, args=(port,))
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join() # Wait for all threads to complete
+
+    open_ports.sort() # Sort the results for better presentation
+    if open_ports:
+        console.print(f"[green]Found potential server ports on {host}: {', '.join(map(str, open_ports))}[/green]")
+    else:
+        console.print(f"[yellow]No open ports found in the range {scan_range.start}-{scan_range.stop-1}. You may need to enter the port manually.[/yellow]")
+        
+    return open_ports
+
 class ChatClient:
     """
     A TCP chat client with a rich, interactive command-line interface.
@@ -444,32 +481,45 @@ class ChatClient:
 if __name__ == "__main__":
     console.print(Panel(f"[bold cyan]Welcome to the Python Group Chat Client!\nVersion: {VERSION}[/bold cyan]", border_style="cyan"))
     try:
-        # Discover servers on the network first
+        # --- Step 1: Discover or Enter Server IP ---
         available_servers = discover_servers()
-        manual_entry_option = "Enter IP manually..."
+        manual_ip_option = "Enter IP manually..."
 
         if available_servers:
-            # Add the manual entry option to the list of choices
-            choices = available_servers + [manual_entry_option]
-            
+            choices = available_servers + [manual_ip_option]
             selection = Prompt.ask(
                 "[cyan]Select a discovered server or enter one manually[/cyan]",
                 choices=choices,
                 default=choices[0]
             )
-
-            if selection == manual_entry_option:
+            if selection == manual_ip_option:
                 server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
             else:
                 server_ip = selection
         else:
-            # If no servers are found, just ask for the IP directly
             server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
 
-        server_port_str = Prompt.ask("[cyan]Enter Server Port[/cyan]", default="8080")
+        # --- Step 2: Discover or Enter Server Port ---
+        found_ports = discover_ports(server_ip)
+        manual_port_option = "Enter port manually..."
+
+        if found_ports:
+            choices = [str(p) for p in found_ports] + [manual_port_option]
+            port_selection = Prompt.ask(
+                "[cyan]Select a discovered port or enter one manually[/cyan]",
+                choices=choices,
+                default=choices[0]
+            )
+            if port_selection == manual_port_option:
+                server_port_str = Prompt.ask("[cyan]Enter Server Port[/cyan]", default="8080")
+            else:
+                server_port_str = port_selection
+        else:
+            server_port_str = Prompt.ask("[cyan]Enter Server Port[/cyan]", default="8080")
+
         server_port = int(server_port_str)
 
-        # The username will now be prompted for after connecting.
+        # --- Step 3: Connect and Start Client ---
         client = ChatClient(server_ip, server_port)
         client.start()
 
