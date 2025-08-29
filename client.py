@@ -88,18 +88,19 @@ class ChatClient:
     A TCP chat client with a rich, interactive command-line interface.
     """
 
-    def __init__(self, host: str, port: int, username: str) -> None:
+    def __init__(self, host: str, port: int) -> None:
         """
         Initializes the ChatClient.
         """
         self.host: str = host
         self.port: int = port
-        self.username: str = username
+        self.username: str = "Connecting..." # A temporary name
         self.client_socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.is_running: bool = False
         self.chat_history: List[Text] = []
         self._lock: threading.Lock = threading.Lock()
-        
+        self.initial_user_list_received = threading.Event()
+
         # UI State
         self.input_buffer: str = ""
         self.scroll_offset: int = 0
@@ -273,14 +274,18 @@ class ChatClient:
                     elif msg_type == "ULIST":
                         with self._lock:
                             self.user_list.clear()
-                            if not payload:
-                                continue
-                            user_entries = payload.split(',')
-                            for entry in user_entries:
-                                # Format is "username(address)"
-                                if '(' in entry and entry.endswith(')'):
-                                    username, address = entry.rsplit('(', 1)
-                                    self.user_list[username] = address[:-1] # Remove trailing ')'
+                            if payload:
+                                user_entries = payload.split(',')
+                                for entry in user_entries:
+                                    # Format is "username(address)"
+                                    if '(' in entry and entry.endswith(')'):
+                                        username, address = entry.rsplit('(', 1)
+                                        self.user_list[username] = address[:-1] # Remove trailing ')'
+                        
+                        # If this is the first user list we've received, signal the main thread
+                        if not self.initial_user_list_received.is_set():
+                            self.initial_user_list_received.set()
+                        
                         self.ui_dirty = True
 
             except (ConnectionResetError, OSError):
@@ -367,37 +372,62 @@ class ChatClient:
 
     def start(self) -> None:
         """
-        Connects to the server and starts the main UI and I/O loops.
+        Connects, validates username, and then starts the main UI and I/O loops.
         """
         if sys.platform != "win32":
             console.print("[bold red]This UI is currently only supported on Windows.[/bold red]")
             console.print("A future version will add support for macOS and Linux.")
             return
-            
+
         try:
             self.client_socket.connect((self.host, self.port))
             self.is_running = True
-            
-            self._send_message(f"CMD_USER|{self.username}")
-
             self._add_message(Text(f"Successfully connected to {self.host}:{self.port}", "green"))
 
-            # Start the thread for receiving messages
             receive_thread = threading.Thread(target=self._receive_messages)
             receive_thread.daemon = True
             receive_thread.start()
 
+            # Wait for the server to send the initial user list, with a timeout
+            with console.status("[cyan]Finalizing connection...[/cyan]"):
+                if not self.initial_user_list_received.wait(timeout=10.0):
+                    console.print("[bold red]Error: Did not receive user list from server.[/bold red]")
+                    self.is_running = False
+                    self.client_socket.close()
+                    return
+
+            # --- Username Prompting and Validation Loop ---
+            while self.is_running:
+                chosen_username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
+                if not chosen_username:
+                    console.print("[bold red]Nickname cannot be empty.[/bold red]")
+                    continue
+
+                is_taken = False
+                with self._lock:
+                    for existing_user in self.user_list.keys():
+                        if existing_user.lower() == chosen_username.lower():
+                            is_taken = True
+                            break
+                
+                if is_taken:
+                    console.print(f"[bold red]Nickname '{chosen_username}' is already in use. Please choose another.[/bold red]")
+                else:
+                    self.username = chosen_username
+                    self._send_message(f"CMD_USER|{self.username}")
+                    break # Success, exit the prompt loop
+            
+            if not self.is_running: # Handle potential shutdown during prompt
+                self.client_socket.close()
+                return
+
+            # --- Main UI Loop ---
             with Live(self.layout, screen=True, redirect_stderr=False, refresh_per_second=20) as live:
                 while self.is_running:
-                    # Handle keyboard input
                     self._handle_input_windows()
-                    
-                    # Only update the layout if something has changed
                     if self.ui_dirty:
                         self._update_layout()
-                        self.ui_dirty = False # Reset the flag
-                    
-                    # Small sleep to prevent busy-waiting and save CPU
+                        self.ui_dirty = False
                     time.sleep(0.01)
 
         except ConnectionRefusedError:
@@ -428,11 +458,10 @@ if __name__ == "__main__":
             server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
 
         server_port_str = Prompt.ask("[cyan]Enter Server Port[/cyan]", default="8080")
-        username = Prompt.ask("[cyan]Enter your Username[/cyan]", default="Guest")
-
         server_port = int(server_port_str)
 
-        client = ChatClient(server_ip, server_port, username)
+        # The username will now be prompted for after connecting.
+        client = ChatClient(server_ip, server_port)
         client.start()
 
     except ValueError:
