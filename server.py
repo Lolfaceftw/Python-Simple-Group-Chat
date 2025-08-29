@@ -82,12 +82,11 @@ class ChatServer:
         Returns True on success, False on failure.
         """
         try:
-            client_socket.send((message + '\n').encode('utf-8'))
+            client_socket.sendall((message + '\n').encode('utf-8'))
             return True
-        except socket.error:
+        except (socket.error, OSError):
             self._remove_client(client_socket)
             return False
-
     def _remove_client(self, client_socket: socket.socket) -> None:
         """
         Removes a client from the active connections.
