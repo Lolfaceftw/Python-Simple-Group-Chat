@@ -164,6 +164,23 @@ class ChatServer:
                         self._broadcast(full_message, client_socket)
                 else:
                     # Handle raw messages (from a basic client)
+                    if message.lower() == '/quit':
+                        console.log(f"[yellow]Client {username} ({addr_str}) issued /quit command.[/yellow]")
+                        break # Exit loop; the 'finally' block will handle cleanup
+                    elif message.lower().startswith('/nick '):
+                        new_username = message.split(' ', 1)[1].strip()
+                        if new_username:
+                            with self.lock:
+                                old_username = self.clients[client_socket][1]
+                                self.clients[client_socket] = (addr_str, new_username)
+                                username = new_username  # Update local username variable
+                            notification = f"SRV|{old_username} is now known as {username}."
+                            console.log(f"[yellow]{notification}[/yellow]")
+                            self._broadcast(notification)
+                            self._broadcast_user_list()
+                        else:
+                            # Optional: Send an error back to the user if the nick is invalid
+                            self._send_direct_message(client_socket, "SRV|Invalid nickname provided.")
                     with self.lock:
                         # Get the client's current username
                         _, current_username = self.clients[client_socket]
