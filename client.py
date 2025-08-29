@@ -27,7 +27,7 @@ DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
 DISCOVERY_TIMEOUT_S = 5
 # ---------------------------------- #
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 console = Console()
 

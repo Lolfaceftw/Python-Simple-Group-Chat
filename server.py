@@ -21,6 +21,8 @@ DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
 BROADCAST_INTERVAL_S = 5
 # ---------------------------------- #
 
+VERSION = 1.2
+
 class ChatServer:
     """
     A multi-threaded TCP chat server.
@@ -137,26 +139,44 @@ class ChatServer:
                 if not message:
                     continue
 
-                parts = message.split('|', 1)
-                msg_type = parts[0]
-                payload = parts[1] if len(parts) > 1 else ""
+                # Handle both prefixed and raw messages
+                if '|' in message:
+                    # Handle prefixed messages (from the rich client)
+                    parts = message.split('|', 1)
+                    msg_type = parts[0]
+                    payload = parts[1] if len(parts) > 1 else ""
 
-                if msg_type == "CMD_USER":
-                    with self.lock:
-                        old_username = self.clients[client_socket][1]
-                        self.clients[client_socket] = (addr_str, payload)
-                        username = payload
-                    notification = f"SRV|{old_username} is now known as {username}."
-                    console.log(f"[yellow]{notification}[/yellow]")
-                    self._broadcast(notification)
-                    self._broadcast_user_list() # Send updated user list
+                    if msg_type == "CMD_USER":
+                        with self.lock:
+                            old_username = self.clients[client_socket][1]
+                            self.clients[client_socket] = (addr_str, payload)
+                            username = payload # Update local username variable for logging
+                        notification = f"SRV|{old_username} is now known as {username}."
+                        console.log(f"[yellow]{notification}[/yellow]")
+                        self._broadcast(notification)
+                        self._broadcast_user_list()
 
-                elif msg_type == "MSG":
-                    console.log(f"[cyan]{payload}[/cyan]")
-                    full_message = f"MSG|{payload}"
+                    elif msg_type == "MSG":
+                        console.log(f"[cyan]{payload}[/cyan]")
+                        full_message = f"MSG|{payload}"
+                        with self.lock:
+                            self.message_history.append(full_message)
+                        self._broadcast(full_message, client_socket)
+                else:
+                    # Handle raw messages (from a basic client)
                     with self.lock:
-                        self.message_history.append(full_message)
-                    self._broadcast(full_message, client_socket)
+                        # Get the client's current username
+                        _, current_username = self.clients[client_socket]
+                    
+                    # Format the raw message as a standard chat message
+                    formatted_payload = f"{current_username}: {message}"
+                    console.log(f"[cyan]{formatted_payload}[/cyan]")
+                    
+                    # Create the message to be broadcasted and stored in history
+                    broadcast_message = f"MSG|{formatted_payload}"
+                    with self.lock:
+                        self.message_history.append(broadcast_message)
+                    self._broadcast(broadcast_message, client_socket)
 
         except (ConnectionResetError, BrokenPipeError):
             console.log(f"[bold red]Connection lost with {username} ({addr_str}).[/bold red]")
