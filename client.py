@@ -4,6 +4,7 @@ import socket
 import sys
 import threading
 import time
+import concurrent.futures
 from typing import Dict, List
 
 from rich.console import Console, Group
@@ -12,6 +13,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.text import Text
+from rich.progress import Progress
 from rich.table import Table
 
 # Platform-specific imports for non-blocking keyboard input
@@ -84,73 +86,80 @@ def discover_servers() -> List[str]:
 
     return server_list
 
+# client.py
+# client.py
+
+# client.py
+
 def scan_and_probe_ports(host: str) -> Dict[int, str]:
     """
-    Scans for open ports and probes them to identify any text-based service.
+    Scans a large port range at high speed and can be cancelled with Ctrl+C.
+    Uses rich.progress for a real-time UI.
 
     Returns:
         A dictionary mapping the port number to its status ("Joinable" or "Open").
     """
     results = {}
-    # We can use a slightly wider common range for general text services
-    scan_range = range(1024, 65535) 
-    
-    with console.status(f"[cyan]Scanning and probing {host} for text-based services...[/cyan]", spinner="dots"):
-        threads = []
-        lock = threading.Lock()
+    scan_range = range(4000, 65536)
+    lock = threading.Lock()
 
-        def probe_port(port):
-            status = ""
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                    sock.settimeout(1.0) # Use a reasonable timeout
-                    if sock.connect_ex((host, port)) == 0:
-                        status = "Open"  # Mark as open by default
-                        try:
-                            # Listen for any initial banner or welcome message.
-                            response = sock.recv(1024)
-                            
-                            if response:
-                                # If we receive ANY data that can be decoded, it's joinable.
-                                # response_text = response.decode('utf-8')
+    progress = Progress(
+        "[progress.description]{task.description}",
+        "[progress.percentage]{task.percentage:>3.0f}%",
+        "Ports: {task.completed}/{task.total}",
+        console=console
+    )
+
+    def probe_port(port: int):
+        """Worker function to probe a single port."""
+        status = ""
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(0.1)
+                if sock.connect_ex((host, port)) == 0:
+                    status = "Open"
+                    try:
+                        banner = sock.recv(1024)
+                        if banner:
+                            if banner.strip().startswith(b'SRV|'):
                                 status = "Joinable"
-                                
-                                # # If it's a basic server asking for a NICK, we must reply to continue.
-                                # if 'NICK' in response_text:
-                                #     sock.send(b'ProbeBot\n')
-
-                                # --- NEW: Send the automated message ---
-                                probe_message = b"[Bot_Ck]\nI am trying to probe this port! This is a an automated message.\n"
-                                sock.send(probe_message)
-                                # The socket will be closed automatically by the 'with' block after this.
-                        except (socket.timeout, UnicodeDecodeError, ConnectionResetError):
-                            # If it times out, sends binary data, or resets the connection,
-                            # it's not a simple text-based server. It remains "Open".
-                            pass
-            except socket.error:
-                pass  # Ignore connection errors
-            
-            if status:
-                with lock:
-                    results[port] = status
-
-        for port in scan_range:
-            thread = threading.Thread(target=probe_port, args=(port,))
-            threads.append(thread)
-            thread.start()
-
-        for thread in threads:
-            thread.join()
-
-    sorted_results = dict(sorted(results.items()))
-    
-    if sorted_results:
-        joinable_count = list(sorted_results.values()).count("Joinable")
-        console.print(f"[green]Scan complete on {host}. Found {len(sorted_results)} open port(s), with {joinable_count} identified as joinable text-based servers.[/green]")
-    else:
-        console.print(f"[yellow]No open ports found in the range {scan_range.start}-{scan_range.stop-1}.[/yellow]")
+                            else:
+                                banner_text = banner.decode('utf-8', errors='ignore')
+                                if 'NICK' in banner_text:
+                                    status = "Joinable"
+                    except (socket.timeout, ConnectionResetError, OSError):
+                        pass
+        except socket.error:
+            pass
         
-    return sorted_results
+        if status:
+            with lock:
+                results[port] = status
+        
+        progress.advance(task_id)
+
+    try:
+        with progress:
+            task_id = progress.add_task(f"[cyan]Scanning {host} (Press Ctrl+C to cancel)...[/cyan]", total=len(scan_range))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1024) as executor:
+                for port in scan_range:
+                    executor.submit(probe_port, port)
+        
+        sorted_results = dict(sorted(results.items()))
+        
+        if sorted_results:
+            joinable_count = list(sorted_results.values()).count("Joinable")
+            console.print(f"[green]Scan complete on {host}. Found {len(sorted_results)} open port(s), with {joinable_count} identified as joinable chat servers.[/green]")
+        else:
+            console.print(f"[yellow]No joinable chat servers found in the range {scan_range.start}-{scan_range.stop-1}.[/yellow]")
+            
+        return sorted_results
+
+    except KeyboardInterrupt:
+        # When Ctrl+C is pressed, this block is executed.
+        console.print("\n[bold yellow]Scan cancelled by user.[/bold yellow]")
+        # Return an empty dictionary to signify no selection was made.
+        return {}
 
 class ChatClient:
     """
@@ -265,7 +274,7 @@ class ChatClient:
                     user_texts.append(Text(username))
             
             if self.user_panel_scroll_offset > 0:
-                title += f" [yellow](scrolled)[/yellow]"
+                title += f" [yellow](scrolled)[/gyellow]"
             
             panel_content = Group(*user_texts)
         else:
