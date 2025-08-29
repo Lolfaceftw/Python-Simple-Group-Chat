@@ -76,7 +76,7 @@ class ChatServer:
             message = f"ULIST|{user_list_str}"
             self._broadcast(message)
 
-    def _send_direct_message(self, client_socket: socket.socket, message: str) -> None:
+    def _send_direct_message(self, client_socket: socket.socket, message: str) -> bool:
         """
         Sends a newline-terminated message directly to a single client.
         Returns True on success, False on failure.

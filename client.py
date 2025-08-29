@@ -486,13 +486,23 @@ class ChatClient:
             self.client_socket.connect((self.host, self.port))
             self.is_running = True
 
-            # --- Instant Server Type Detection ---
-            # Receive the very first packet to identify the server type instantly.
-            initial_data = self.client_socket.recv(1024)
-            if initial_data.strip().startswith(b'SRV|'):
+            # --- Non-Blocking Server Type Detection ---
+            initial_data = b''
+            try:
+                # Set a short timeout to prevent blocking indefinitely on silent servers.
+                self.client_socket.settimeout(0.5)
+                initial_data = self.client_socket.recv(1024)
+            except socket.timeout:
+                # It's a silent server that sends no banner. Treat as basic.
+                pass
+            finally:
+                # Always restore the socket to blocking mode for the main receive loop.
+                self.client_socket.settimeout(None)
+
+            if initial_data and initial_data.strip().startswith(b'SRV|'):
                 self.is_rich_server = True
             
-            # Pre-load the buffer so the receive thread can process this first packet.
+            # Pre-load the buffer with whatever we received (even if it's empty).
             self.network_buffer = initial_data
             
             # Now that the buffer is primed, start the receive thread.
@@ -524,7 +534,7 @@ class ChatClient:
                 console.print("[yellow]Basic server detected. Joining with default name 'Guest'.[/yellow]")
                 # The default username is "Guest" from __init__.
                 # We must send it to satisfy the basic server's 'NICK' prompt.
-                self._send_message(self.username + '\n')
+                self._send_message(self.username)
 
             if not self.is_running:
                 self.client_socket.close()
