@@ -254,6 +254,21 @@ class ChatClient:
                     if msg_type == "MSG":
                         self._add_message(Text(payload, "cyan"))
                     elif msg_type == "SRV":
+                        if " is now known as " in payload:
+                            try:
+                                old_name, new_name_part = payload.split(" is now known as ", 1)
+                                # Remove the trailing period from the message
+                                new_name = new_name_part.rstrip('.')
+
+                                # If this message confirms our own name change, update our state
+                                with self._lock:
+                                    if old_name == self.username:
+                                        self.username = new_name
+                                        # We don't add a message here because the server broadcast will be added below
+                            except ValueError:
+                                # Ignore malformed messages
+                                pass
+                        
                         self._add_message(Text(f"=> {payload}", "yellow italic"))
                     elif msg_type == "ULIST":
                         with self._lock:
@@ -281,7 +296,7 @@ class ChatClient:
     def _send_message(self, message: str) -> None:
         """Sends a formatted message to the server."""
         try:
-            self.client_socket.send(message.encode('utf-8'))
+            self.client_socket.send(( message + "\n").encode('utf-8'))
         except BrokenPipeError:
             pass
 
@@ -330,10 +345,10 @@ class ChatClient:
                     elif message_text.startswith('/nick '):
                         new_username = message_text.split(' ', 1)[1].strip()
                         if new_username:
-                            # Optimistically update the local username
-                            self.username = new_username
-                            self._send_message(f"CMD_USER|{self.username}")
-                            self._add_message(Text(f"Username changed to {self.username}", "green"))
+                            # Send the request to the server; do NOT change the local username yet.
+                            self._send_message(f"CMD_USER|{new_username}")
+                            # Add a local message to confirm the attempt was made.
+                            self._add_message(Text(f"Attempting to change nickname to '{new_username}'...", "yellow"))
                         else:
                             self._add_message(Text("Invalid nickname.", "red"))
                     else:

@@ -21,7 +21,7 @@ DISCOVERY_MESSAGE = b"PYTHON_CHAT_SERVER_DISCOVERY_V1"
 BROADCAST_INTERVAL_S = 5
 # ---------------------------------- #
 
-VERSION = 1.2
+VERSION = '1.2'
 
 class ChatServer:
     """
@@ -60,7 +60,7 @@ class ChatServer:
                                                      sends to all clients.
         """
         with self.lock:
-            for client_socket in self.clients:
+            for client_socket in list(self.clients):
                 if client_socket != sender_socket:
                     self._send_direct_message(client_socket, message)
 
@@ -103,6 +103,24 @@ class ChatServer:
                 self.message_history.append(notification)
                 self._broadcast(notification)
                 self._broadcast_user_list()
+
+    def _is_username_taken(self, username: str, requesting_socket: socket.socket) -> bool:
+        """
+        Checks if a username is already in use by another client (case-insensitive).
+
+        Args:
+            username (str): The username to check.
+            requesting_socket (socket.socket): The socket of the client requesting the name change.
+
+        Returns:
+            bool: True if the username is taken, False otherwise.
+        """
+        with self.lock:
+            for client_socket, (_, existing_username) in self.clients.items():
+                # Check against other clients, not the one making the request
+                if client_socket != requesting_socket and existing_username.lower() == username.lower():
+                    return True
+            return False
 
     def _handle_client(self, client_socket: socket.socket, address: Tuple[str, int]) -> None:
         """
@@ -148,13 +166,21 @@ class ChatServer:
 
                     if msg_type == "CMD_USER":
                         with self.lock:
-                            old_username = self.clients[client_socket][1]
-                            self.clients[client_socket] = (addr_str, payload)
-                            username = payload # Update local username variable for logging
-                        notification = f"SRV|{old_username} is now known as {username}."
-                        console.log(f"[yellow]{notification}[/yellow]")
-                        self._broadcast(notification)
-                        self._broadcast_user_list()
+                            _, current_username = self.clients[client_socket]
+                        
+                        if current_username.lower() == payload.lower():
+                            self._send_direct_message(client_socket, "SRV|Did you even change your name?")
+                        elif self._is_username_taken(payload, client_socket):
+                            self._send_direct_message(client_socket, f"SRV|Nickname '{payload}' is already taken.")
+                        else:
+                            with self.lock:
+                                old_username = self.clients[client_socket][1]
+                                self.clients[client_socket] = (addr_str, payload)
+                                username = payload # Update local username variable for logging
+                            notification = f"SRV|{old_username} is now known as {username}."
+                            console.log(f"[yellow]{notification}[/yellow]")
+                            self._broadcast(notification)
+                            self._broadcast_user_list()
 
                     elif msg_type == "MSG":
                         console.log(f"[cyan]{payload}[/cyan]")
@@ -166,34 +192,41 @@ class ChatServer:
                     # Handle raw messages (from a basic client)
                     if message.lower() == '/quit':
                         console.log(f"[yellow]Client {username} ({addr_str}) issued /quit command.[/yellow]")
-                        break # Exit loop; the 'finally' block will handle cleanup
+                        break  # Exit loop; the 'finally' block will handle cleanup
+
                     elif message.lower().startswith('/nick '):
                         new_username = message.split(' ', 1)[1].strip()
                         if new_username:
                             with self.lock:
-                                old_username = self.clients[client_socket][1]
-                                self.clients[client_socket] = (addr_str, new_username)
-                                username = new_username  # Update local username variable
-                            notification = f"SRV|{old_username} is now known as {username}."
-                            console.log(f"[yellow]{notification}[/yellow]")
-                            self._broadcast(notification)
-                            self._broadcast_user_list()
+                                _, current_username = self.clients[client_socket]
+
+                            if current_username.lower() == new_username.lower():
+                                self._send_direct_message(client_socket, "SRV|Did you even change your name?")
+                            elif self._is_username_taken(new_username, client_socket):
+                                self._send_direct_message(client_socket, f"SRV|Nickname '{new_username}' is already taken.")
+                            else:
+                                with self.lock:
+                                    old_username = self.clients[client_socket][1]
+                                    self.clients[client_socket] = (addr_str, new_username)
+                                    username = new_username  # Update local username variable
+                                notification = f"SRV|{old_username} is now known as {username}."
+                                console.log(f"[yellow]{notification}[/yellow]")
+                                self._broadcast(notification)
+                                self._broadcast_user_list()
                         else:
-                            # Optional: Send an error back to the user if the nick is invalid
                             self._send_direct_message(client_socket, "SRV|Invalid nickname provided.")
-                    with self.lock:
-                        # Get the client's current username
-                        _, current_username = self.clients[client_socket]
-                    
-                    # Format the raw message as a standard chat message
-                    formatted_payload = f"{current_username}: {message}"
-                    console.log(f"[cyan]{formatted_payload}[/cyan]")
-                    
-                    # Create the message to be broadcasted and stored in history
-                    broadcast_message = f"MSG|{formatted_payload}"
-                    with self.lock:
-                        self.message_history.append(broadcast_message)
-                    self._broadcast(broadcast_message, client_socket)
+                    else:
+                        # It's a regular message
+                        with self.lock:
+                            _, current_username = self.clients[client_socket]
+                        
+                        formatted_payload = f"{current_username}: {message}"
+                        console.log(f"[cyan]{formatted_payload}[/cyan]")
+                        
+                        broadcast_message = f"MSG|{formatted_payload}"
+                        with self.lock:
+                            self.message_history.append(broadcast_message)
+                        self._broadcast(broadcast_message, client_socket)
 
         except (ConnectionResetError, BrokenPipeError):
             console.log(f"[bold red]Connection lost with {username} ({addr_str}).[/bold red]")
