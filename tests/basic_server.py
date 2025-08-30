@@ -2,7 +2,7 @@ import socket
 import threading
 
 # Connection Data
-host = '127.0.0.1'  # Standard loopback interface address (localhost)
+host = '0.0.0.0'  # Listen for connections on all available network interfaces.
 port = 55555        # Port to listen on (non-privileged ports are > 1023)
 
 # Starting Server
