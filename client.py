@@ -7,6 +7,8 @@ import time
 import concurrent.futures
 import netifaces
 import ipaddress
+import requests
+import nmap
 from typing import Dict, List, Tuple
 
 from rich.console import Console, Group
@@ -162,6 +164,37 @@ def scan_and_probe_ports(host: str) -> Dict[int, str]:
         console.print("\n[bold yellow]Scan cancelled by user.[/bold yellow]")
         # Return an empty dictionary to signify no selection was made.
         return {}
+def get_os_from_ip(ip_address: str) -> str:
+    """
+    Performs an Nmap OS detection scan on a given IP address.
+
+    Args:
+        ip_address (str): The IP address to scan.
+
+    Returns:
+        str: The detected OS, or "Unknown" if detection fails.
+    """
+    nm = nmap.PortScanner()
+    try:
+        # The -O flag requires root privileges on Linux/macOS,
+        # and administrator privileges on Windows.
+        # The script must be run with these privileges.
+        nm.scan(hosts=ip_address, arguments='-O')
+        if nm.all_hosts() and 'osmatch' in nm[ip_address] and nm[ip_address]['osmatch']:
+            return nm[ip_address]['osmatch'][0]['name']
+        else:
+            return "Unknown"
+    except nmap.nmap.PortScannerError as e:
+        if "requires root privileges" in str(e).lower():
+            console.log("[bold red]Nmap OS detection requires root/administrator privileges. Please run the script with sudo (on Linux/macOS) or as an administrator (on Windows).[/bold red]")
+        else:
+            console.log(f"[bold red]Nmap error: {e}. Please make sure Nmap is installed and in your PATH.[/bold red]")
+        return "Unknown"
+    except Exception as e:
+        # This will catch other errors, like permission denied if not run with sudo
+        console.log(f"[red]An error occurred during OS detection for {ip_address}: {e}[/red]")
+        return "Unknown"
+
 def get_local_ipv4_addresses() -> List[str]:
     """
     Gets all non-loopback IPv4 addresses of the local machine using netifaces.
@@ -204,11 +237,49 @@ def get_lan_scan_target() -> str | None:
         return None
     return None
 
+def get_vendor_from_mac_api(mac_address: str) -> str:
+    """
+    Looks up the vendor of a device from its MAC address using multiple sources.
+
+    Args:
+        mac_address (str): The MAC address to look up.
+
+    Returns:
+        str: The vendor of the device, or "Unknown" if the lookup fails.
+    """
+    # 1. Try scapy's local database first
+    try:
+        from scapy.config import conf
+        vendor = conf.manufdb._get_manuf(mac_address)
+        if vendor != mac_address:
+            return vendor
+    except Exception:
+        pass
+
+    # 2. Try macvendors.com API
+    try:
+        response = requests.get(f"https://api.macvendors.com/{mac_address}", timeout=2)
+        if response.status_code == 200 and response.text:
+            return response.text
+    except requests.exceptions.RequestException:
+        pass
+
+    # 3. Try macvendorlookup.com API
+    try:
+        response = requests.get(f"https://www.macvendorlookup.com/api/v1/{mac_address}", timeout=2)
+        if response.status_code == 200 and response.text:
+            # The response is "The company is <vendor_name>"
+            return response.text.replace("The company is ", "")
+    except requests.exceptions.RequestException:
+        pass
+
+    return "Unknown"
+
 # client.py
-def discover_lan_hosts() -> List[Tuple[str, str]]:
+def discover_lan_hosts() -> List[Tuple[str, str, str]]:
     """
     Discovers other hosts on the local network using an ARP scan.
-    Returns a list of tuples: (ip_address, device_vendor).
+    Returns a list of tuples: (ip_address, device_vendor, mac_address).
     Requires scapy and admin privileges.
     """
     lan_hosts = []
@@ -227,25 +298,30 @@ def discover_lan_hosts() -> List[Tuple[str, str]]:
             console.log("[yellow]Could not determine local network range. Skipping LAN host discovery.[/yellow]")
             return []
 
-        console.print(f"[dim]Performing ARP scan on network: {scan_target}...[/dim]")
-        
-        arp = ARP(pdst=scan_target)
-        ether = Ether(dst="ff:ff:ff:ff:ff:ff")
-        packet = ether/arp
+        with console.status(f"[cyan]Performing ARP scan on network: {scan_target}...[/cyan]", spinner="dots"):
+            arp = ARP(pdst=scan_target)
+            ether = Ether(dst="ff:ff:ff:ff:ff:ff")
+            packet = ether/arp
 
-        result = srp(packet, timeout=2, verbose=False)[0]
+            result = srp(packet, timeout=2, verbose=False)[0]
 
         # Parse results to get both IP and the MAC address vendor
         for sent, received in result:
+            mac_address = received.src
             device_vendor = "Unknown"
             try:
                 # This is the robust, programmatic way to perform an OUI lookup
-                mac_address = received.src
                 device_vendor = conf.manufdb._get_manuf(mac_address)
+                if device_vendor == mac_address: # if scapy returns mac address, it means it's unknown
+                    device_vendor = "Unknown"
             except Exception:
                 # If the lookup fails for any reason, we default to "Unknown"
                 pass
-            lan_hosts.append((received.psrc, device_vendor))
+
+            if device_vendor == "Unknown":
+                device_vendor = get_vendor_from_mac_api(mac_address)
+
+            lan_hosts.append((received.psrc, device_vendor, mac_address))
 
     except PermissionError:
         console.log("[bold red]Permission denied for ARP scan. Please run as an administrator (or with sudo).[/bold red]")
@@ -659,10 +735,32 @@ if __name__ == "__main__":
     try:
         # --- Step 1: Discover all potential servers ---
         advertised_servers = discover_servers()
-        lan_hosts = discover_lan_hosts()
+        lan_hosts_with_mac = discover_lan_hosts()
         local_interfaces = get_local_ipv4_addresses()
         manual_ip_option = "Enter IP manually..."
         
+        discovered_devices = {}
+        
+        progress = Progress(
+            "[progress.description]{task.description}",
+            "[progress.percentage]{task.percentage:>3.0f}%",
+            "Hosts: {task.completed}/{task.total}",
+            console=console
+        )
+
+        with progress:
+            task_id = progress.add_task("[cyan]Scanning for OS...[/cyan]", total=len(lan_hosts_with_mac))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_ip = {executor.submit(get_os_from_ip, ip): (ip, vendor, mac) for ip, vendor, mac in lan_hosts_with_mac}
+                for future in concurrent.futures.as_completed(future_to_ip):
+                    ip, vendor, mac = future_to_ip[future]
+                    try:
+                        os = future.result()
+                        discovered_devices[ip] = {"vendor": vendor, "mac": mac, "os": os}
+                    except Exception as exc:
+                        console.log(f'[red]{ip} generated an exception: {exc}[/red]')
+                    progress.advance(task_id)
+
         selectable_ips = []
         server_table = Table(
             title="Server Selection",
@@ -673,6 +771,7 @@ if __name__ == "__main__":
         server_table.add_column("Option", style="dim", width=8)
         server_table.add_column("IP Address")
         server_table.add_column("Device / Manufacturer", style="italic")
+        server_table.add_column("Operating System", style="italic")
         server_table.add_column("Type")
 
         option_num = 1
@@ -683,16 +782,20 @@ if __name__ == "__main__":
             for ip in advertised_servers:
                 if ip not in selectable_ips:
                     # We don't have device info for these, so leave it blank
-                    server_table.add_row(str(option_num), ip, "N/A", "[bold green]Advertised[/bold green]")
+                    server_table.add_row(str(option_num), ip, "N/A", "N/A", "[bold green]Advertised[/bold green]")
                     selectable_ips.append(ip)
                     option_num += 1
         
         # Add other discovered LAN hosts with their device info
-        if lan_hosts:
+        if discovered_devices:
             server_table.add_section()
-            for ip, device_info in lan_hosts:
+            # Sort by IP address for consistent ordering
+            sorted_devices = sorted(discovered_devices.items(), key=lambda item: tuple(map(int, item[0].split('.'))))
+            for ip, data in sorted_devices:
                 if ip not in selectable_ips:
-                    server_table.add_row(str(option_num), ip, device_info, "[yellow]Discovered[/yellow]")
+                    device_info = Text(data["vendor"])
+                    device_info.append(f"\n{data['mac']}", style="dim")
+                    server_table.add_row(str(option_num), ip, device_info, data["os"], "[yellow]Discovered[/yellow]")
                     selectable_ips.append(ip)
                     option_num += 1
 
@@ -701,7 +804,7 @@ if __name__ == "__main__":
             server_table.add_section()
             for ip in local_interfaces:
                 if ip not in selectable_ips:
-                    server_table.add_row(str(option_num), ip, "This PC", "[cyan]Local Interface[/cyan]")
+                    server_table.add_row(str(option_num), ip, "This PC", "N/A", "[cyan]Local Interface[/cyan]")
                     selectable_ips.append(ip)
                     option_num += 1
 
@@ -718,6 +821,8 @@ if __name__ == "__main__":
         else:
             console.print("[yellow]No servers were found. Please enter an IP manually.[/yellow]")
             server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
+
+
 
         # --- Step 2: Scan, Probe, and Select Port (This part remains the same) ---
         probed_ports = scan_and_probe_ports(server_ip)

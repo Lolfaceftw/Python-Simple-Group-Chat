@@ -1,3 +1,5 @@
 rich
 netifaces
 scapy
+requests
+python-nmap
