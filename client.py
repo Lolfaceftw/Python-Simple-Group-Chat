@@ -606,8 +606,7 @@ class ChatClient:
                             if new_username:
                                 # For basic servers, just send the raw command and update locally
                                 self._send_message(message_text)
-                                self.username = new_username
-                                self._add_message(Text(f"Username changed to {self.username}", "green"))
+                                self._add_message(Text(f"Requested nickname change to '{new_username}'", "yellow"))
                             else:
                                 self._add_message(Text("Invalid nickname.", "red"))
                         else:
