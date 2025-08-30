@@ -144,17 +144,28 @@ class ChatServer:
             # Create a thread-safe copy of the history while locked
             history_copy = list(self.message_history)
 
-        # Now, iterate over the safe copy outside of the lock
+        # Send welcome message and message history
         if not self._send_direct_message(client_socket, "SRV|Welcome! Here are the recent messages:"):
-            return # Client disconnected while sending, exit thread
+            return # Client disconnected
 
         for msg in history_copy:
             if not self._send_direct_message(client_socket, msg):
-                return # Client disconnected while sending, exit thread
-            
-            join_notification = f"SRV|{username} has joined the chat."
-            self._broadcast(join_notification, client_socket)
-            self._broadcast_user_list() # Send initial user list
+                return # Client disconnected
+        
+        # --- FIX: Send the current user list directly to the new client ---
+        with self.lock:
+            user_list_str = ",".join(
+                [f"{username}({addr})" for addr, username in self.clients.values()]
+            )
+            initial_ulist_message = f"ULIST|{user_list_str}"
+        
+        if not self._send_direct_message(client_socket, initial_ulist_message):
+            return # Client disconnected
+
+        # Announce the new user to everyone else and send them the updated list
+        join_notification = f"SRV|{username} has joined the chat."
+        self._broadcast(join_notification, client_socket)
+        self._broadcast_user_list()
 
         try:
             while True:

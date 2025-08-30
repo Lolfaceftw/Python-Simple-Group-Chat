@@ -152,7 +152,7 @@ def scan_and_probe_ports(host: str) -> Dict[int, str]:
     try:
         with progress:
             task_id = progress.add_task(f"[cyan]Scanning {host} (Press Ctrl+C to cancel)...[/cyan]", total=len(scan_ports))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=200) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1024) as executor:
                 for port in scan_ports:
                     executor.submit(probe_port, port)
         
