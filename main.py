@@ -39,8 +39,12 @@ if __name__ == "__main__":
 
         with progress:
             task_id = progress.add_task("[cyan]Scanning for OS...[/cyan]", total=len(lan_hosts_with_mac))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1024) as executor:
-                future_to_ip = {executor.submit(get_os_from_ip, ip, perform_os_scan): (ip, vendor, mac) for ip, vendor, mac in lan_hosts_with_mac}
+            max_workers = min(64, max(1, len(lan_hosts_with_mac)))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_ip = {
+                    executor.submit(get_os_from_ip, ip, perform_os_scan): (ip, vendor, mac)
+                    for ip, vendor, mac in lan_hosts_with_mac
+                }
                 for future in concurrent.futures.as_completed(future_to_ip):
                     ip, vendor, mac = future_to_ip[future]
                     try:
