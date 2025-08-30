@@ -1,2 +1,3 @@
 rich
 netifaces
+scapy

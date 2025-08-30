@@ -5,7 +5,9 @@ import sys
 import threading
 import time
 import concurrent.futures
-from typing import Dict, List
+import netifaces
+import ipaddress
+from typing import Dict, List, Tuple
 
 from rich.console import Console, Group
 from rich.layout import Layout
@@ -160,7 +162,98 @@ def scan_and_probe_ports(host: str) -> Dict[int, str]:
         console.print("\n[bold yellow]Scan cancelled by user.[/bold yellow]")
         # Return an empty dictionary to signify no selection was made.
         return {}
+def get_local_ipv4_addresses() -> List[str]:
+    """
+    Gets all non-loopback IPv4 addresses of the local machine using netifaces.
+    These are potential IPs if running the server on the same local network.
+    """
+    local_ips = set()
+    try:
+        for iface in netifaces.interfaces():
+            ifaddresses = netifaces.ifaddresses(iface)
+            if netifaces.AF_INET in ifaddresses:
+                for addr_info in ifaddresses[netifaces.AF_INET]:
+                    ip = addr_info.get('addr')
+                    # Filter out the loopback address and ensure it's not None
+                    if ip and ip != '127.0.0.1':
+                        local_ips.add(ip)
+    except Exception as e:
+        console.log(f"[yellow]Could not enumerate local IP addresses: {e}[/yellow]")
+    return sorted(list(local_ips))
+def get_lan_scan_target() -> str | None:
+    """
+    Intelligently determines the correct LAN network range (e.g., 192.168.1.0/24)
+    by finding the local IP and its corresponding netmask.
+    """
+    try:
+        # Find a primary, non-loopback IP address for the local machine
+        local_ip = get_local_ipv4_addresses()[0]
 
+        # Find the netmask associated with that IP address
+        for iface in netifaces.interfaces():
+            ifaddresses = netifaces.ifaddresses(iface)
+            if netifaces.AF_INET in ifaddresses:
+                for addr_info in ifaddresses[netifaces.AF_INET]:
+                    if addr_info.get('addr') == local_ip:
+                        netmask = addr_info.get('netmask')
+                        # Use the ipaddress module to calculate the network range in CIDR notation
+                        network = ipaddress.ip_network(f"{local_ip}/{netmask}", strict=False)
+                        return str(network)
+    except (IndexError, KeyError):
+        # Fails if no suitable network interface is found
+        return None
+    return None
+
+# client.py
+def discover_lan_hosts() -> List[Tuple[str, str]]:
+    """
+    Discovers other hosts on the local network using an ARP scan.
+    Returns a list of tuples: (ip_address, device_vendor).
+    Requires scapy and admin privileges.
+    """
+    lan_hosts = []
+    try:
+        # Import scapy and its config object
+        from scapy.all import ARP, Ether, srp
+        from scapy.config import conf
+    except ImportError:
+        console.log("[yellow]Scapy is not installed. Skipping LAN host discovery.[/yellow]")
+        console.log("[dim]Install it with: pip install scapy[/dim]")
+        return []
+
+    try:
+        scan_target = get_lan_scan_target()
+        if not scan_target:
+            console.log("[yellow]Could not determine local network range. Skipping LAN host discovery.[/yellow]")
+            return []
+
+        console.print(f"[dim]Performing ARP scan on network: {scan_target}...[/dim]")
+        
+        arp = ARP(pdst=scan_target)
+        ether = Ether(dst="ff:ff:ff:ff:ff:ff")
+        packet = ether/arp
+
+        result = srp(packet, timeout=2, verbose=False)[0]
+
+        # Parse results to get both IP and the MAC address vendor
+        for sent, received in result:
+            device_vendor = "Unknown"
+            try:
+                # This is the robust, programmatic way to perform an OUI lookup
+                mac_address = received.src
+                device_vendor = conf.manufdb._get_manuf(mac_address)
+            except Exception:
+                # If the lookup fails for any reason, we default to "Unknown"
+                pass
+            lan_hosts.append((received.psrc, device_vendor))
+
+    except PermissionError:
+        console.log("[bold red]Permission denied for ARP scan. Please run as an administrator (or with sudo).[/bold red]")
+    except Exception as e:
+        console.log(f"[red]An error occurred during LAN host discovery: {e}[/red]")
+        
+    # Sort numerically
+    return sorted(lan_hosts, key=lambda item: tuple(map(int, item[0].split('.'))))
 class ChatClient:
     """
     A TCP chat client with a rich, interactive command-line interface.
@@ -561,47 +654,72 @@ class ChatClient:
             # Ensure the live display is stopped before printing final messages
             console.print("[bold blue]You have been disconnected. Goodbye![/bold blue]")
 
-
-
-# client.py
-
 if __name__ == "__main__":
     console.print(Panel(f"[bold cyan]Welcome to the Python Group Chat Client!\nVersion: {VERSION}[/bold cyan]", border_style="cyan"))
     try:
-        # --- Step 1: Discover or Enter Server IP ---
-        available_servers = discover_servers()
+        # --- Step 1: Discover all potential servers ---
+        advertised_servers = discover_servers()
+        lan_hosts = discover_lan_hosts()
+        local_interfaces = get_local_ipv4_addresses()
         manual_ip_option = "Enter IP manually..."
+        
+        selectable_ips = []
+        server_table = Table(
+            title="Server Selection",
+            show_header=True,
+            header_style="bold magenta",
+            caption="[dim]'Advertised' servers are broadcasting. 'Discovered' are other hosts on your LAN.[/dim]"
+        )
+        server_table.add_column("Option", style="dim", width=8)
+        server_table.add_column("IP Address")
+        server_table.add_column("Device / Manufacturer", style="italic")
+        server_table.add_column("Type")
 
-        if available_servers:
-            # Display discovered servers in a neat table with an explanatory caption
-            server_table = Table(
-                title="Discovered Servers",
-                show_header=True,
-                header_style="bold magenta",
-                caption="[dim]Servers are discovered only if they support and broadcast the discovery protocol.[/dim]"
-            )
-            server_table.add_column("Option", style="dim", width=8)
-            server_table.add_column("IP Address")
+        option_num = 1
 
-            for i, ip in enumerate(available_servers, 1):
-                server_table.add_row(str(i), ip)
-            
+        # Add advertised servers (highest priority)
+        if advertised_servers:
+            server_table.add_section()
+            for ip in advertised_servers:
+                if ip not in selectable_ips:
+                    # We don't have device info for these, so leave it blank
+                    server_table.add_row(str(option_num), ip, "N/A", "[bold green]Advertised[/bold green]")
+                    selectable_ips.append(ip)
+                    option_num += 1
+        
+        # Add other discovered LAN hosts with their device info
+        if lan_hosts:
+            server_table.add_section()
+            for ip, device_info in lan_hosts:
+                if ip not in selectable_ips:
+                    server_table.add_row(str(option_num), ip, device_info, "[yellow]Discovered[/yellow]")
+                    selectable_ips.append(ip)
+                    option_num += 1
+
+        # Add your own machine's IPs as a fallback
+        if local_interfaces:
+            server_table.add_section()
+            for ip in local_interfaces:
+                if ip not in selectable_ips:
+                    server_table.add_row(str(option_num), ip, "This PC", "[cyan]Local Interface[/cyan]")
+                    selectable_ips.append(ip)
+                    option_num += 1
+
+        # --- Prompt user for selection ---
+        if selectable_ips:
             console.print(server_table)
-            
-            prompt_choices = [str(i) for i in range(1, len(available_servers) + 1)] + [manual_ip_option]
+            prompt_choices = [str(i) for i in range(1, len(selectable_ips) + 1)] + [manual_ip_option]
             selection = Prompt.ask("[cyan]Select a server by number or choose an option[/cyan]", choices=prompt_choices, default="1")
 
             if selection == manual_ip_option:
                 server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
             else:
-                server_ip = available_servers[int(selection) - 1]
+                server_ip = selectable_ips[int(selection) - 1]
         else:
-            # Add clarity for when no servers are found
-            console.print("[yellow]No servers were found advertising on the network.[/yellow]")
-            console.print("[dim]This is normal for basic servers or servers on a different network.[/dim]")
-            server_ip = Prompt.ask("[cyan]Please enter the Server IP manually[/cyan]", default="127.0.0.1")
+            console.print("[yellow]No servers were found. Please enter an IP manually.[/yellow]")
+            server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
 
-        # --- Step 2: Scan, Probe, and Select Port ---
+        # --- Step 2: Scan, Probe, and Select Port (This part remains the same) ---
         probed_ports = scan_and_probe_ports(server_ip)
         manual_port_option = "Enter port manually..."
         
@@ -610,7 +728,7 @@ if __name__ == "__main__":
                 title=f"Scan Results for {server_ip}",
                 show_header=True,
                 header_style="bold magenta",
-                caption="[dim]A '[bold green]Joinable[/bold green]' server is one that was responsive and returned text upon connection.[/dim]"
+                caption="[dim]A '[bold green]Joinable[/bold green]' server is one that was responsive to our probe.[/dim]"
             )
             port_table.add_column("Port", justify="right", style="cyan", no_wrap=True)
             port_table.add_column("Status")
@@ -619,7 +737,6 @@ if __name__ == "__main__":
             joinable_ports = {p: s for p, s in probed_ports.items() if s == "Joinable"}
             open_ports = {p: s for p, s in probed_ports.items() if s == "Open"}
 
-            # List joinable ports first for convenience
             for port, status in joinable_ports.items():
                 port_table.add_row(str(port), f"[bold green]{status}[/bold green]")
                 prompt_choices.append(str(port))
@@ -654,4 +771,4 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, EOFError):
         console.print("\n[bold blue]Client startup cancelled.[/bold blue]")
     except Exception as e:
-        console.print(f"[bold red]An error occurred during startup: {e}[/bold red]")    
+        console.print(f"[bold red]An error occurred during startup: {e}[/bold red]")
