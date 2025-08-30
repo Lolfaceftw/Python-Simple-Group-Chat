@@ -179,7 +179,8 @@ def get_os_from_ip(ip_address: str) -> str:
         # The -O flag requires root privileges on Linux/macOS,
         # and administrator privileges on Windows.
         # The script must be run with these privileges.
-        nm.scan(hosts=ip_address, arguments='-O')
+        # -T4 for more aggressive timing
+        nm.scan(hosts=ip_address, arguments='-O -T4')
         if nm.all_hosts() and 'osmatch' in nm[ip_address] and nm[ip_address]['osmatch']:
             return nm[ip_address]['osmatch'][0]['name']
         else:
@@ -750,7 +751,7 @@ if __name__ == "__main__":
 
         with progress:
             task_id = progress.add_task("[cyan]Scanning for OS...[/cyan]", total=len(lan_hosts_with_mac))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
                 future_to_ip = {executor.submit(get_os_from_ip, ip): (ip, vendor, mac) for ip, vendor, mac in lan_hosts_with_mac}
                 for future in concurrent.futures.as_completed(future_to_ip):
                     ip, vendor, mac = future_to_ip[future]
@@ -821,6 +822,7 @@ if __name__ == "__main__":
         else:
             console.print("[yellow]No servers were found. Please enter an IP manually.[/yellow]")
             server_ip = Prompt.ask("[cyan]Enter Server IP[/cyan]", default="127.0.0.1")
+
 
 
 
