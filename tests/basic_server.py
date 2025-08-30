@@ -101,7 +101,8 @@ def receive():
             # Start Handling Thread For Client
             thread = threading.Thread(target=handle, args=(client,))
             thread.start()
-
+        except KeyboardInterrupt:
+            print(f"Exiting...")
         except Exception as e:
             print(f"An error occurred during client connection: {e}")
 
