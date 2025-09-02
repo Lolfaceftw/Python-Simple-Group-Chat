@@ -1,5 +1,5 @@
-rich
-netifaces
-scapy
-requests
-python-nmap
+rich==14.1.0
+netifaces==0.11.0
+scapy==2.6.1
+requests==2.32.5
+python-nmap==0.7.1

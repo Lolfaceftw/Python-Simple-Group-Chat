@@ -1,5 +1,4 @@
-A modern, multi-threaded TCP chat application built with Python. It features a sophisticated server and an interactive, rich-text client interface powered by the `rich` library. The application supports automatic server discovery on the local network, making it easy to connect and start chatting.
-
+A modern, multi-threaded TCP chat application built with Python. It features a sophisticated server and an interactive, rich-text client interface powered by the `rich` library. The application supports advanced network discovery, making it easy to find and connect to chat servers.
 
 ## Key Features
 
@@ -10,11 +9,15 @@ A modern, multi-threaded TCP chat application built with Python. It features a s
 - **Real-time User List:** Keeps all clients synchronized with the current list of connected users.
 - **Graceful Shutdown:** Handles `Ctrl+C` to cleanly disconnect all clients and shut down.
 - **Thread-Safe:** Uses locks to ensure safe access to shared resources like the client list and message history.
-- **Broad Compatibility:** Accepts connections from both the included rich client and basic tools like `netcat`.
+- **Broad Compatibility:** Accepts connections from both the included rich client and basic tools like `netcat`, handling raw and protocol-based messages.
 
-### Client (`client.py`)
+### Client (`main.py` & `client.py`)
+- **Advanced Network Discovery:**
+    - **Advertised Servers:** Automatically detects servers using the application's UDP broadcast.
+    - **LAN Host Discovery:** Performs an ARP scan to discover all other devices on the local network.
+    - **OS Detection:** Optionally runs an Nmap scan to identify the operating system of discovered devices (requires admin privileges).
+- **Intelligent Port Scanning:** After selecting a host, the client scans a wide range of ports, probing for open and joinable chat services.
 - **Rich TUI:** A polished and interactive Terminal User Interface built with the `rich` library.
-- **Automatic Server Discovery:** Scans the local network to find and list available chat servers.
 - **Dual-Panel Layout:** Simultaneously view the live chat history and the list of online users.
 - **Interactive Controls:**
     - Switch between chat and user panels with the `TAB` key.
@@ -27,7 +30,10 @@ A modern, multi-threaded TCP chat application built with Python. It features a s
 The project requires Python 3.6+ and the following libraries:
 
 - `rich`: For the beautiful and interactive client-side TUI.
-- `netifaces`: For robust network interface discovery on the server to ensure broadcast messages reach all subnets.
+- `netifaces`: For robust network interface discovery.
+- `scapy`: For LAN host discovery via ARP scans (requires admin privileges).
+- `python-nmap`: For OS detection scans (requires admin privileges and Nmap installation).
+- `requests`: Used for network-related utilities.
 
 ## Installation
 
@@ -37,11 +43,11 @@ The project requires Python 3.6+ and the following libraries:
     cd python-rich-chat
     ```
 
-2.  **Install the dependencies:**
+2.  **(Optional but Recommended) Install Nmap:** For the OS detection feature to work, you must have the Nmap utility installed and available in your system's PATH.
+
+3.  **Install the dependencies:**
     ```bash
     pip install -r requirements.txt
-    # Or install them manually
-    # pip install rich netifaces
     ```
 
 ## How to Use
@@ -57,13 +63,15 @@ You will be asked for a port to run on (e.g., `8080`). The server will then bind
 
 ### 2. Start the Client
 
-Next, run the client script in a new terminal.
+Next, run the main script in a new terminal. This will launch the interactive discovery and connection wizard.
 
 ```bash
-python client.py
+python main.py
 ```
-The client will automatically scan the network for active servers. You can select a discovered server or choose to enter an IP address and port manually. After connecting, you will be prompted to choose a username.
-
+The client will guide you through the following steps:
+1.  **Server Discovery:** It scans the network and presents a table of all found devices, categorized as "Advertised", "Discovered" (from ARP scan), or "Local Interface". You can also choose to enter an IP address manually.
+2.  **Port Selection:** After you select a host, it scans for open ports and displays a list of potentially "Joinable" services. You can select a port from the list or enter one manually.
+3.  **Username:** Once connected, you will be prompted to choose a username. The client prevents you from selecting a name that is already in use on the server.
 
 ### 3. Start Chatting!
 - Type your message and press `Enter` to send.
@@ -85,55 +93,50 @@ This simple protocol allows clients to parse incoming data easily and determines
 
 ## Server and Client Sequence Diagram
 
-The following diagram illustrates the typical flow of events between the server and multiple clients, from initial connection to message exchange and disconnection.
+The following diagram illustrates the updated flow, from discovery and connection to message exchange.
 
 ```mermaid
 sequenceDiagram
-    participant ClientA
-    participant ClientB
+    participant User
+    participant MainScript as main.py
+    participant Client
     participant Server
 
-    %% Server Startup and Discovery %%
-    Server->>Server: Start and begin UDP broadcast
-    ClientA->>ClientA: Start and listen for UDP broadcast
-    Server-->>ClientA: Discovery Message
-    ClientA->>Server: Establish TCP Connection
+    %% Server Startup %%
+    User->>Server: python server.py
+    Server->>Server: Start TCP Listener & UDP Broadcast
 
-    %% Client A Handshake %%
-    Server->>ClientA: Send Welcome & Message History
-    Server->>ClientA: ULIST|...
-    ClientA->>ClientA: Prompt for Username
-    ClientA->>Server: CMD_USER|Alice
+    %% Client Startup & Discovery %%
+    User->>MainScript: python main.py
+    MainScript->>MainScript: Discover Servers (UDP & ARP)
+    Server-->>MainScript: Discovery Message (UDP)
+    MainScript->>MainScript: Scan Ports for selected host
+    MainScript->>User: Display discovered servers & ports
+    User->>MainScript: Select Server & Port
+
+    %% Client Connection %%
+    MainScript->>Client: Start Client(ip, port)
+    Client->>Server: Establish TCP Connection
+    Server->>Client: Send Welcome & Message History
+    Server->>Client: ULIST|... (current user list)
+    
+    %% Client Handshake %%
+    Client->>User: Prompt for Username
+    User->>Client: Enter Username
+    Client->>Server: CMD_USER|Alice
     Server->>Server: Validate & Store Username
-    Server->>ClientA: SRV|Alice has joined the chat.
-    Server->>ClientA: ULIST|Alice(addr)
+    Server-->>Client: SRV|Alice has joined the chat.
+    Server-->>Client: ULIST|Alice(addr)
 
-    %% Client B Joins %%
-    ClientB->>ClientB: Start and discover server
-    ClientB->>Server: Establish TCP Connection
-    Server->>ClientB: Send Welcome & Message History
-    Server->>ClientB: ULIST|Alice(addr)
-    Server->>ClientA: ULIST|Alice(addr)
-    ClientB->>ClientB: Prompt for Username
-    ClientB->>Server: CMD_USER|Bob
-    Server->>Server: Validate & Store Username
-    Server-->>ClientA: SRV|Bob has joined the chat.
-    Server-->>ClientB: SRV|Bob has joined the chat.
-    Server-->>ClientA: ULIST|Alice(addr),Bob(addr2)
-    Server-->>ClientB: ULIST|Alice(addr),Bob(addr2)
+    %% Chatting (Simplified) %%
+    Client->>Server: MSG|Alice: Hello!
+    Server-->>Client: MSG|Alice: Hello!
 
-    %% Chatting %%
-    ClientA->>Server: MSG|Alice: Hello everyone!
-    Server-->>ClientB: MSG|Alice: Hello everyone!
-
-    ClientB->>Server: MSG|Bob: Hi Alice!
-    Server-->>ClientA: MSG|Bob: Hi Alice!
-
-    %% Client A Disconnects %%
-    ClientA-xServer: TCP connection lost
-    Server->>Server: Detect disconnection, remove ClientA
-    Server-->>ClientB: SRV|Alice has left the chat.
-    Server-->>ClientB: ULIST|Bob(addr2)
+    %% Disconnection %%
+    User->>Client: /quit
+    Client-xServer: TCP connection lost
+    Server->>Server: Detect disconnection, remove Client
+    Server-->>Server: Broadcast user departure & new ULIST
 
 ```
 
@@ -147,4 +150,4 @@ sequenceDiagram
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE.md) file for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
