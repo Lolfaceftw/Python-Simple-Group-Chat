@@ -40,8 +40,6 @@ The project requires Python 3.6+ and the following libraries:
 2.  **Install the dependencies:**
     ```bash
     pip install -r requirements.txt
-    # Or install them manually
-    # pip install rich netifaces
     ```
 
 ## How to Use
