@@ -39,8 +39,8 @@ The project requires Python 3.6+ and the following libraries:
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://your-repository-url.com/python-rich-chat.git
-    cd python-rich-chat
+    git clone https://github.com/Lolfaceftw/Python-Simple-Group-Chat.git
+    cd Python-Simple-Group-Chat
     ```
 
 2.  **(Optional but Recommended) Install Nmap:** For the OS detection feature to work, you must have the Nmap utility installed and available in your system's PATH.
